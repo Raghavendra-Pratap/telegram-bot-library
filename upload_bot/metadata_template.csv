@@ -1,0 +1,5 @@
+filename,file_path,category,description,channel,upload_as,quality,tags,group_by,skip,priority
+photo1.jpg,photos/2024/photo1.jpg,photos,Family vacation photo,@my_photos,auto,HD,vacation,2024,false,1
+doc1.pdf,documents/reports/doc1.pdf,documents,Monthly report,@my_docs,document,,reports,false,1
+video1.mp4,videos/events/video1.mp4,videos,Event recording,@my_videos,video,HD,events,2024,false,1
+

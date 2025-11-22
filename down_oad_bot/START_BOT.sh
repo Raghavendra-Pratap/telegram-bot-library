@@ -1,0 +1,60 @@
+#!/bin/bash
+
+# Quick start script for the Telegram Bot
+# This script should be run from the down_oad_bot directory
+
+# Get the directory where this script is located
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+cd "$SCRIPT_DIR"
+
+echo "🎬 Starting Telegram Video Downloader Bot..."
+echo ""
+
+# Check if virtual environment exists
+if [ ! -d "venv" ]; then
+    echo "❌ Virtual environment not found!"
+    echo "Run: python3 -m venv venv && source venv/bin/activate && pip install -r requirements.txt"
+    exit 1
+fi
+
+# Determine Python executable in venv
+if [ -f "venv/bin/python" ]; then
+    PYTHON_CMD="venv/bin/python"
+elif [ -f "venv/bin/python3" ]; then
+    PYTHON_CMD="venv/bin/python3"
+else
+    echo "❌ Python not found in venv!"
+    echo "Run: python3 -m venv venv && source venv/bin/activate && pip install -r requirements.txt"
+    exit 1
+fi
+
+# Activate virtual environment (for PATH and other env vars)
+source venv/bin/activate
+
+# Check if .env exists
+if [ ! -f ".env" ]; then
+    echo "❌ .env file not found!"
+    echo "Run: cp env_template.txt .env"
+    echo "Then edit .env and add your TELEGRAM_BOT_TOKEN"
+    exit 1
+fi
+
+# Check if token is configured
+if grep -q "your_bot_token_here" .env; then
+    echo "⚠️  Warning: Bot token not configured in .env"
+    echo "Please edit .env and add your TELEGRAM_BOT_TOKEN"
+    echo "See GET_BOT_TOKEN.md for instructions"
+    exit 1
+fi
+
+# Run test setup
+echo "Running setup test..."
+$PYTHON_CMD test_setup.py
+echo ""
+
+# Start the bot
+echo "Starting bot..."
+echo "Press Ctrl+C to stop"
+echo ""
+$PYTHON_CMD bot.py
+
