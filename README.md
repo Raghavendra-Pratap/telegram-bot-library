@@ -13,6 +13,14 @@ Telegram_Bot_Library/
 │   ├── utils/            # Utility modules
 │   ├── requirements.txt  # Dependencies
 │   └── ...
+├── upload_bot/            # File Upload Bot
+│   ├── bot.py            # Main bot file
+│   ├── config.py         # Configuration
+│   ├── uploaders/        # Upload handlers
+│   ├── metadata/         # CSV/Sheets integration
+│   ├── utils/            # Utility modules
+│   ├── requirements.txt  # Dependencies
+│   └── ...
 └── [future bots]/        # Additional bots will be added here
 ```
 
@@ -26,6 +34,8 @@ A comprehensive video downloader bot that supports:
 - Twitter/X videos
 - Instagram Reels
 - GIF platforms
+- High quality downloads (up to 4K)
+- Audio extraction (MP3)
 
 **Quick Start:**
 ```bash
@@ -34,6 +44,28 @@ cd down_oad_bot
 ```
 
 See `down_oad_bot/README.md` for full documentation.
+
+### 📤 Upload Bot (`upload_bot/`)
+
+A comprehensive file upload bot with advanced features:
+- Folder structure metadata in captions
+- CSV/Google Sheets integration for metadata
+- Flexible file grouping by metadata columns
+- Channel selection per file/group
+- Multiple upload formats (document, photo, video, audio)
+- Media groups and sequential uploads
+
+**Quick Start:**
+```bash
+cd upload_bot
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+# Configure .env file with your bot token
+python bot.py
+```
+
+See `upload_bot/README.md` for full documentation.
 
 ## Adding New Bots
 
