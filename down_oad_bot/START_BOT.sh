@@ -47,6 +47,23 @@ if grep -q "your_bot_token_here" .env; then
     exit 1
 fi
 
+# Check for other bot instances
+BOT_PIDS=$(ps aux | grep -i "python.*bot.py" | grep -v grep | awk '{print $2}')
+if [ ! -z "$BOT_PIDS" ]; then
+    echo "⚠️  Warning: Found other bot instances running:"
+    ps aux | grep -i "python.*bot.py" | grep -v grep
+    echo ""
+    echo "These may cause conflicts. To stop them, run:"
+    echo "  ./stop_other_instances.sh"
+    echo ""
+    read -p "Continue anyway? (y/n) " -n 1 -r
+    echo ""
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        echo "Cancelled. Please stop other instances first."
+        exit 1
+    fi
+fi
+
 # Run test setup
 echo "Running setup test..."
 $PYTHON_CMD test_setup.py

@@ -16,6 +16,7 @@ from telegram.ext import (
     filters
 )
 from telegram.constants import ParseMode
+from telegram.error import Conflict, TimedOut, NetworkError
 
 from config import (
     TELEGRAM_BOT_TOKEN,
@@ -327,30 +328,25 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Handle playlist
             video_count = video_info.get('video_count', 0)
             playlist_title = video_info.get('title', 'Playlist')
+            entries = video_info.get('entries', [])
             
             # Store playlist info
             context.user_data['urls'][url_hash]['is_playlist'] = True
             
-            # Get available formats for first video (to show quality options)
-            # We'll use the first video's formats as a reference
-            entries = video_info.get('entries', [])
+            # Try to get quality options from first video
+            keyboard = []
             first_video_url = None
+            
             if entries and len(entries) > 0:
                 first_video = entries[0]
-                # Try different ways to get the video URL
                 first_video_url = (
                     first_video.get('url') or 
                     first_video.get('webpage_url') or 
-                    first_video.get('id')  # Sometimes it's just the ID
+                    f"https://www.youtube.com/watch?v={first_video.get('id', '')}"
                 )
-                # If we only have an ID, construct the URL
-                if first_video_url and not first_video_url.startswith('http'):
-                    first_video_url = f"https://www.youtube.com/watch?v={first_video_url}"
             
-            keyboard = []
-            
-            # If we have a first video URL, get its formats for quality selection
-            if first_video_url and first_video_url.startswith('http'):
+            # Get available formats for quality selection
+            if first_video_url:
                 try:
                     first_video_info = downloader.get_video_info(first_video_url)
                     available_formats = first_video_info.get('available_formats', []) if first_video_info else []
@@ -361,7 +357,7 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             resolution = fmt.get('resolution', 'Best')
                             filesize = fmt.get('filesize', 0)
                             
-                            # Format file size (estimate per video)
+                            # Estimate total size (per video * count)
                             if filesize > 0:
                                 estimated_total = filesize * video_count
                                 if estimated_total < 1024 * 1024:
@@ -405,7 +401,10 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             info_text = f"📚 *{playlist_title}*\n\n"
             info_text += f"📊 Videos: {video_count}\n\n"
-            info_text += "*Choose download quality:*"
+            if keyboard and len(keyboard) > 2:  # Has quality options
+                info_text += "*Choose download quality:*"
+            else:
+                info_text += "*Choose an option:*"
             
             await processing_msg.edit_text(
                 info_text,
@@ -757,172 +756,45 @@ async def handle_upload_choice(update: Update, context: ContextTypes.DEFAULT_TYP
                 await query.edit_message_text("❌ Playlist folder not found.")
                 return
             
-            # Get all video files from playlist folder - sort by name for consistent order
+            # Get all video files from playlist folder - sort for consistent order
             if all_files:
                 video_files = sorted([Path(f) for f in all_files if Path(f).exists()], key=lambda x: x.name)
             else:
                 video_files = sorted(playlist_folder.glob("*.mp4"), key=lambda x: x.name)
-            
-            # Also check for other video formats
-            if not video_files:
-                video_files = sorted(playlist_folder.glob("*.webm"), key=lambda x: x.name)
-            if not video_files:
-                video_files = sorted(playlist_folder.glob("*.mkv"), key=lambda x: x.name)
+                # Also check for other formats
+                if not video_files:
+                    video_files = sorted(playlist_folder.glob("*.webm"), key=lambda x: x.name)
+                if not video_files:
+                    video_files = sorted(playlist_folder.glob("*.mkv"), key=lambda x: x.name)
             
             if not video_files:
                 await query.edit_message_text("❌ No video files found in playlist folder.")
                 return
-            
-            # Log all files found for debugging
-            logger.info(f"Found {len(video_files)} files in playlist folder:")
-            for f in video_files:
-                logger.info(f"  - {f.name} ({f.stat().st_size / (1024*1024):.2f} MB)")
             
             file_count = len(video_files)
             total_size = sum(f.stat().st_size for f in video_files)
             size_mb = total_size / (1024 * 1024)
             size_text = f"{size_mb:.2f} MB" if size_mb < 1024 else f"{size_mb / 1024:.2f} GB"
             
-            # Start uploading files one by one
+            # Start uploading files using queue system
             await query.edit_message_text(
-                f"⏳ Uploading playlist to Telegram...\n\n"
+                f"⏳ Starting playlist upload...\n\n"
                 f"📁 Total: {file_count} videos\n"
                 f"📦 Total Size: {size_text}\n\n"
-                f"Uploading files individually...",
+                f"Processing upload queue...",
                 parse_mode=ParseMode.MARKDOWN
             )
             
+            # Process uploads in background task to avoid blocking
             import asyncio
-            uploaded_count = 0
-            failed_count = 0
-            failed_files = []
-            max_size = 4 * 1024 * 1024 * 1024  # 4GB Telegram limit
-            
-            chat_id = query.message.chat_id
-            message_id = query.message.message_id
-            
-            for idx, video_file in enumerate(video_files, 1):
-                try:
-                    # Verify file exists and is readable
-                    if not video_file.exists():
-                        logger.error(f"File does not exist: {video_file}")
-                        failed_count += 1
-                        failed_files.append(video_file.name)
-                        continue
-                    
-                    file_size = video_file.stat().st_size
-                    
-                    # Skip files that are too large
-                    if file_size > max_size:
-                        logger.warning(f"File {video_file.name} is too large ({file_size / (1024*1024):.2f} MB), skipping")
-                        failed_count += 1
-                        failed_files.append(f"{video_file.name} (too large)")
-                        continue
-                    
-                    # Skip empty files
-                    if file_size == 0:
-                        logger.warning(f"File {video_file.name} is empty, skipping")
-                        failed_count += 1
-                        failed_files.append(f"{video_file.name} (empty)")
-                        continue
-                    
-                    # Update progress message
-                    file_size_mb = file_size / (1024 * 1024)
-                    file_size_text = f"{file_size_mb:.2f} MB" if file_size_mb < 1024 else f"{file_size_mb / 1024:.2f} GB"
-                    
-                    await query.edit_message_text(
-                        f"⏳ Uploading playlist...\n\n"
-                        f"📹 File {idx}/{file_count}: {video_file.name[:50]}\n"
-                        f"📦 Size: {file_size_text}\n\n"
-                        f"✅ Uploaded: {uploaded_count}\n"
-                        f"❌ Failed: {failed_count}",
-                        parse_mode=ParseMode.MARKDOWN
-                    )
-                    
-                    # Upload video with retry logic
-                    max_retries = 3
-                    upload_success = False
-                    
-                    for retry in range(max_retries):
-                        try:
-                            logger.info(f"Attempting upload {retry + 1}/{max_retries} for {video_file.name}")
-                            
-                            # Use absolute path to avoid any path issues
-                            video_path = str(video_file.absolute())
-                            
-                            # Use context.bot to send video directly
-                            await asyncio.wait_for(
-                                context.bot.send_video(
-                                    chat_id=chat_id,
-                                    video=video_path,
-                                    caption=f"📹 {video_file.name[:200]}\n📦 {file_size_text}",
-                                    supports_streaming=True,
-                                    read_timeout=300,  # 5 minutes
-                                    write_timeout=300,
-                                    reply_to_message_id=message_id if idx == 1 else None  # Only reply to first message
-                                ),
-                                timeout=600  # 10 minutes total per file
-                            )
-                            uploaded_count += 1
-                            upload_success = True
-                            logger.info(f"✅ Successfully uploaded {idx}/{file_count}: {video_file.name}")
-                            break  # Success, exit retry loop
-                            
-                        except asyncio.TimeoutError:
-                            logger.error(f"Upload timeout (attempt {retry + 1}/{max_retries}) for {video_file.name}")
-                            if retry < max_retries - 1:
-                                await asyncio.sleep(5)  # Wait before retry
-                            else:
-                                failed_count += 1
-                                failed_files.append(f"{video_file.name} (timeout)")
-                        except Exception as upload_error:
-                            error_msg = str(upload_error)
-                            logger.error(f"Error uploading {video_file.name} (attempt {retry + 1}/{max_retries}): {error_msg}")
-                            
-                            # Check if it's a rate limit error
-                            if "rate limit" in error_msg.lower() or "429" in error_msg or "flood" in error_msg.lower():
-                                wait_time = (retry + 1) * 10  # Exponential backoff: 10s, 20s, 30s
-                                logger.warning(f"Rate limited, waiting {wait_time} seconds before retry...")
-                                await asyncio.sleep(wait_time)
-                                continue
-                            
-                            if retry < max_retries - 1:
-                                await asyncio.sleep(5)  # Wait before retry
-                            else:
-                                failed_count += 1
-                                failed_files.append(f"{video_file.name} ({error_msg[:50]})")
-                                import traceback
-                                logger.error(traceback.format_exc())
-                    
-                    # Delay between uploads to avoid rate limiting
-                    # Longer delay if we just had a failure
-                    if idx < file_count:  # Don't wait after last file
-                        delay = 3 if upload_success else 5  # Longer delay if failed
-                        await asyncio.sleep(delay)
-                    
-                except Exception as e:
-                    logger.error(f"Error processing {video_file.name}: {str(e)}")
-                    import traceback
-                    logger.error(traceback.format_exc())
-                    failed_count += 1
-                    failed_files.append(f"{video_file.name} (processing error)")
-                    continue
-            
-            # Final summary message
-            success_text = f"✅ Uploaded: {uploaded_count} videos"
-            if failed_count > 0:
-                success_text += f"\n❌ Failed: {failed_count} videos"
-                if failed_files:
-                    failed_list = "\n".join([f"  • {f}" for f in failed_files[:5]])  # Show first 5
-                    if len(failed_files) > 5:
-                        failed_list += f"\n  ... and {len(failed_files) - 5} more"
-                    success_text += f"\n\nFailed files:\n{failed_list}"
-            
-            summary_text = f"✅ Playlist upload complete!\n\n{success_text}\n\n📁 Total: {file_count} videos\n📦 Total Size: {size_text}\n📂 Folder: `{playlist_folder.absolute()}`\n\nAll videos are saved locally."
-            
-            await query.edit_message_text(
-                summary_text,
-                parse_mode=ParseMode.MARKDOWN
+            asyncio.create_task(
+                upload_playlist_queue(
+                    context,
+                    query.message.chat_id,
+                    query.message.message_id,
+                    video_files,
+                    playlist_folder
+                )
             )
             return
         
@@ -1053,6 +925,207 @@ async def handle_upload_choice(update: Update, context: ContextTypes.DEFAULT_TYP
         )
 
 
+async def upload_playlist_queue(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    status_message_id: int,
+    video_files: list,
+    playlist_folder: Path
+):
+    """Upload playlist files sequentially with proper queue handling"""
+    import asyncio
+    
+    uploaded_count = 0
+    failed_count = 0
+    failed_files = []
+    max_size = 4 * 1024 * 1024 * 1024  # 4GB Telegram limit
+    max_retries = 3
+    file_count = len(video_files)
+    
+    try:
+        for idx, video_file in enumerate(video_files, 1):
+            try:
+                # Verify file exists
+                if not video_file.exists():
+                    logger.error(f"File does not exist: {video_file}")
+                    failed_count += 1
+                    failed_files.append(f"{video_file.name} (not found)")
+                    continue
+                
+                file_size = video_file.stat().st_size
+                
+                # Skip empty files
+                if file_size == 0:
+                    logger.warning(f"File {video_file.name} is empty, skipping")
+                    failed_count += 1
+                    failed_files.append(f"{video_file.name} (empty)")
+                    continue
+                
+                # Skip files that are too large
+                if file_size > max_size:
+                    logger.warning(f"File {video_file.name} is too large ({file_size / (1024*1024):.2f} MB), skipping")
+                    failed_count += 1
+                    failed_files.append(f"{video_file.name} (too large)")
+                    continue
+                
+                # Update progress message
+                file_size_mb = file_size / (1024 * 1024)
+                file_size_text = f"{file_size_mb:.2f} MB" if file_size_mb < 1024 else f"{file_size_mb / 1024:.2f} GB"
+                
+                try:
+                    await context.bot.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=status_message_id,
+                        text=(
+                            f"⏳ Uploading playlist...\n\n"
+                            f"📹 File {idx}/{file_count}: {video_file.name[:50]}\n"
+                            f"📦 Size: {file_size_text}\n\n"
+                            f"✅ Uploaded: {uploaded_count}\n"
+                            f"❌ Failed: {failed_count}"
+                        ),
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+                except Exception as e:
+                    logger.debug(f"Could not update status message: {str(e)}")
+                
+                # Upload with retry logic
+                upload_success = False
+                for retry in range(max_retries):
+                    try:
+                        logger.info(f"Uploading {idx}/{file_count}: {video_file.name} (attempt {retry + 1}/{max_retries})")
+                        
+                        # Upload video with timeout
+                        await asyncio.wait_for(
+                            context.bot.send_video(
+                                chat_id=chat_id,
+                                video=str(video_file.absolute()),
+                                caption=f"📹 {video_file.name[:200]}\n📦 {file_size_text}",
+                                supports_streaming=True,
+                                read_timeout=300,  # 5 minutes
+                                write_timeout=300
+                            ),
+                            timeout=600  # 10 minutes total per file
+                        )
+                        
+                        uploaded_count += 1
+                        upload_success = True
+                        logger.info(f"✅ Successfully uploaded {idx}/{file_count}: {video_file.name}")
+                        break  # Success, exit retry loop
+                        
+                    except asyncio.TimeoutError:
+                        logger.error(f"Upload timeout (attempt {retry + 1}/{max_retries}) for {video_file.name}")
+                        if retry < max_retries - 1:
+                            await asyncio.sleep(5)  # Wait before retry
+                        else:
+                            failed_count += 1
+                            failed_files.append(f"{video_file.name} (timeout)")
+                    except Exception as upload_error:
+                        error_msg = str(upload_error)
+                        logger.error(f"Error uploading {video_file.name} (attempt {retry + 1}/{max_retries}): {error_msg}")
+                        
+                        # Check if it's a rate limit error
+                        if "rate limit" in error_msg.lower() or "429" in error_msg or "flood" in error_msg.lower():
+                            wait_time = (retry + 1) * 10  # Exponential backoff: 10s, 20s, 30s
+                            logger.warning(f"Rate limited, waiting {wait_time} seconds before retry...")
+                            await asyncio.sleep(wait_time)
+                            continue
+                        
+                        if retry < max_retries - 1:
+                            await asyncio.sleep(5)  # Wait before retry
+                        else:
+                            failed_count += 1
+                            failed_files.append(f"{video_file.name} ({error_msg[:50]})")
+                
+                # Delay between uploads to avoid rate limiting
+                if idx < file_count:  # Don't wait after last file
+                    delay = 2 if upload_success else 5  # Longer delay if failed
+                    await asyncio.sleep(delay)
+                    
+            except Exception as e:
+                logger.error(f"Error processing {video_file.name}: {str(e)}")
+                import traceback
+                logger.error(traceback.format_exc())
+                failed_count += 1
+                failed_files.append(f"{video_file.name} (error)")
+                continue
+        
+        # Final summary
+        total_size = sum(f.stat().st_size for f in video_files if f.exists())
+        size_mb = total_size / (1024 * 1024)
+        size_text = f"{size_mb:.2f} MB" if size_mb < 1024 else f"{size_mb / 1024:.2f} GB"
+        
+        success_text = f"✅ Uploaded: {uploaded_count} videos"
+        if failed_count > 0:
+            success_text += f"\n❌ Failed: {failed_count} videos"
+            if failed_files:
+                failed_list = "\n".join([f"  • {f}" for f in failed_files[:5]])
+                if len(failed_files) > 5:
+                    failed_list += f"\n  ... and {len(failed_files) - 5} more"
+                success_text += f"\n\nFailed files:\n{failed_list}"
+        
+        summary_text = (
+            f"✅ Playlist upload complete!\n\n"
+            f"{success_text}\n\n"
+            f"📁 Total: {file_count} videos\n"
+            f"📦 Total Size: {size_text}\n"
+            f"📂 Folder: `{playlist_folder.absolute()}`\n\n"
+            f"All videos are saved locally."
+        )
+        
+        try:
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=status_message_id,
+                text=summary_text,
+                parse_mode=ParseMode.MARKDOWN
+            )
+        except Exception as e:
+            logger.error(f"Error updating final message: {str(e)}")
+            
+    except Exception as e:
+        logger.error(f"Error in upload queue: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+        try:
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=status_message_id,
+                text=f"❌ Upload queue error: {str(e)}",
+                parse_mode=ParseMode.MARKDOWN
+            )
+        except:
+            pass
+
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle errors in the bot"""
+    error = context.error
+    
+    # Handle Conflict error (multiple bot instances)
+    if isinstance(error, Conflict):
+        logger.error("❌ Bot conflict detected!")
+        logger.error("Another bot instance is already running.")
+        logger.error("The bot will continue but may have issues.")
+        logger.error("To fix: Stop all other bot instances and restart.")
+        # Try to clear webhook and get updates
+        try:
+            await context.bot.delete_webhook(drop_pending_updates=True)
+            logger.info("Cleared webhook and pending updates")
+            # Wait a bit before continuing
+            await asyncio.sleep(2)
+        except Exception as e:
+            logger.debug(f"Could not clear webhook: {str(e)}")
+        return  # Don't log as error, just warn
+    
+    # Handle network errors
+    elif isinstance(error, (NetworkError, TimedOut)):
+        logger.warning(f"Network error: {error}. Will retry...")
+        return  # These are expected and will retry
+    
+    # Handle other errors
+    logger.error(f"Exception while handling an update: {error}", exc_info=error)
+
+
 def main():
     """Start the bot"""
     if not TELEGRAM_BOT_TOKEN:
@@ -1061,6 +1134,9 @@ def main():
     
     # Create application
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    
+    # Add error handler
+    application.add_error_handler(error_handler)
     
     # Add handlers
     application.add_handler(CommandHandler("start", start))
@@ -1072,9 +1148,33 @@ def main():
         handle_url
     ))
     
-    # Start bot
+    # Start bot with conflict handling
     logger.info("Bot starting...")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    
+    try:
+        # Start polling with conflict handling
+        application.run_polling(
+            allowed_updates=Update.ALL_TYPES,
+            drop_pending_updates=True,  # Drop pending updates on start
+            close_loop=False
+        )
+    except Conflict as e:
+        logger.error("❌ Bot conflict detected!")
+        logger.error("Another bot instance is already running.")
+        logger.error("Please stop all other bot instances and try again.")
+        logger.error(f"Error: {str(e)}")
+        logger.error("\nTo fix:")
+        logger.error("1. Find and stop other bot processes:")
+        logger.error("   ps aux | grep bot.py")
+        logger.error("2. Or kill all Python processes (be careful!):")
+        logger.error("   pkill -f bot.py")
+        logger.error("3. Wait a few seconds, then restart the bot")
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by user")
+    except Exception as e:
+        logger.error(f"Fatal error: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
 
 
 if __name__ == "__main__":
