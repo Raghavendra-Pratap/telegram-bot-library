@@ -1,0 +1,11 @@
+# Telegram Bot Configuration
+TELEGRAM_BOT_TOKEN=your_bot_token_here
+
+# User Access Control (Optional - for private bot)
+# Set ENABLE_USER_VERIFICATION=true to restrict bot to specific users
+# Set ALLOWED_USER_IDS to comma-separated list of Telegram user IDs
+# Example: ALLOWED_USER_IDS=123456789,987654321
+# To get your user ID, message @userinfobot on Telegram
+ENABLE_USER_VERIFICATION=false
+ALLOWED_USER_IDS=
+
