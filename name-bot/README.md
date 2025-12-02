@@ -60,6 +60,31 @@ ALLOWED_USER_IDS=123456789,987654321
 # Optional - Retry Configuration
 RETRY_DELAY=1.0
 MAX_RETRIES=3
+
+# Optional - Filename Handling
+# If true, skip adding caption when original filename is not available (mobile uploads)
+# If false, use generated filename (file_id based) as caption
+SKIP_IF_NO_FILENAME=false
+
+# Optional - Rate Limiting (Optimized for 100 files)
+# Delay between processing files (in seconds) to avoid hitting Telegram rate limits
+# Recommended values:
+#   - 1.0 second: For <50 files
+#   - 2.0 seconds: For 50-100 files (default, optimized for 100 files)
+#   - 3.0 seconds: For 100+ files
+PROCESSING_DELAY=2.0
+
+# Optional - Retry Configuration (Optimized for large batches)
+# Delay between retries when errors occur
+RETRY_DELAY=2.0
+
+# Maximum retry attempts (increased for flood control handling)
+MAX_RETRIES=5
+
+# Flood control retry delay multiplier
+# When flood control is hit, wait this multiplier × requested time
+# 1.5 = wait 50% longer than Telegram requests (safer, prevents re-rate-limiting)
+FLOOD_RETRY_DELAY_MULTIPLIER=1.5
 ```
 
 ### 3. Get Bot Token
@@ -79,12 +104,14 @@ python bot.py
 ### How It Works
 
 1. **Add bot to your channel/group as admin**
+
    - Go to your channel/group settings
    - Add administrators
    - Add this bot
    - **Enable "Edit messages" permission** (required!)
 
 2. **Upload files directly to your channel/group**
+
    - Upload any file (video, document, photo, audio, etc.) to the channel/group
    - The bot automatically detects the file
    - Bot extracts the filename and adds it as caption
@@ -92,11 +119,46 @@ python bot.py
 
 3. **That's it!** The caption is added automatically
 
+### Forwarded Files
+
+✅ **Forwarded files are automatically processed!**
+
+- When you forward a file to a channel/group, bot treats it as a new message
+- Bot automatically adds filename as caption (if filename is available)
+- Works the same as direct uploads
+- **Best solution for adding captions to old files:** Forward them to the channel/group
+
+### Adding Captions to Old Files
+
+⚠️ **Files uploaded before bot was added won't get captions automatically.**
+
+**Solutions:**
+
+1. **Forward the files** (Recommended):
+
+   - Forward old files to the channel/group
+   - Bot will automatically add captions
+   - Works if original file had filename
+
+2. **Use `/process_recent` command**:
+
+   - Processes recent messages (limited by Telegram API)
+   - May not work for very old messages
+   - Requires bot to be admin
+
+3. **Re-upload files**:
+   - Download and re-upload with proper names
+   - Bot will add captions automatically
+
+**Note:** Telegram API has limitations on accessing old messages. Forwarding is the most reliable solution.
+
 ### Commands
 
 - `/start` - Show welcome message and setup instructions
 - `/help` - Show detailed help information
 - `/status` - Check bot status and permissions in current chat
+- `/process_recent [N]` - Process recent messages to add captions (see below)
+- `/add_caption <msg_id>` - Add caption to specific message by ID (see below)
 
 ### Important Notes
 
@@ -110,16 +172,50 @@ python bot.py
 ### How It Works in Groups vs Channels
 
 **Channels:**
+
 - Bot can directly edit messages to add captions
 - Single upload, just caption added
 
 **Groups:**
+
 - If message is from bot → Directly edit (like channels)
 - If message is from another user → Delete original and repost with caption
   - This requires "Delete messages" permission
   - Uses file_id (no download/reupload needed)
   - Original message is replaced with new one containing caption
 - Works in both channels and groups (not just channels)
+
+### Mobile Upload Limitations
+
+⚠️ **When uploading from mobile devices:**
+
+- Files uploaded directly from gallery/camera may not preserve original filenames
+- Telegram doesn't always provide the `file_name` attribute for mobile uploads
+- This is a **Telegram API limitation** - the bot cannot retrieve filenames that Telegram doesn't provide
+
+**Options:**
+
+1. **Skip caption when filename unavailable** (Recommended):
+
+   ```env
+   SKIP_IF_NO_FILENAME=true
+   ```
+
+   - Bot won't add caption for files without original filename
+   - Prevents ugly file_id-based captions
+
+2. **Use generated filename** (Default):
+   ```env
+   SKIP_IF_NO_FILENAME=false
+   ```
+   - Bot will use file_id-based filename as caption
+   - Example: `video_BAACAgUAAx0CZWS2yQACBBbBpLwb7Ut0Rz2zgVm8f6_Lt288IegACvx0AAjDEeVWnudslJ7q98jYE.mp4`
+
+**Workarounds:**
+
+- Rename files before uploading from mobile
+- Use "Send as File" option in Telegram mobile app (instead of "Send as Photo/Video")
+- Upload from desktop (typically preserves filenames correctly)
 
 ## Supported File Types
 
@@ -154,11 +250,13 @@ If you experience issues with caption editing, you can adjust retry settings:
 ### Captions Not Being Added
 
 1. **Check bot permissions:**
+
    - Use `/status` command in your channel/group
    - Make sure bot is admin
    - Make sure bot has "Edit messages" permission
 
 2. **Check bot logs:**
+
    - Look for error messages in the console
    - Common errors:
      - "Permission denied" - Bot doesn't have edit permission
@@ -191,16 +289,42 @@ If you see "Permission denied" errors:
 
 1. Bot listens for file uploads in channels/groups
 2. When a file is detected, bot extracts the filename
-3. Bot waits 0.5 seconds for message to be fully processed
+3. Bot waits `PROCESSING_DELAY` seconds (default: 2.0s) for message processing and rate limit spacing
 4. Bot edits the message to add filename as caption
-5. If editing fails, bot retries up to 3 times with 1 second delay
+5. If editing fails, bot retries up to `MAX_RETRIES` times (default: 5) with `RETRY_DELAY` delay (default: 2.0s)
+6. If flood control is hit, bot waits for specified time (with multiplier) and retries automatically
 
 ### Error Handling
 
 - Network errors: Automatic retry with exponential backoff
 - Permission errors: Logged and skipped (no retry)
 - Invalid messages: Logged and skipped
-- Rate limiting: Handled automatically by python-telegram-bot
+- **Flood control (rate limiting)**: Automatically waits for specified time and retries
+  - Bot detects "Flood control exceeded" errors
+  - Parses retry time from error message (e.g., "Retry in 30 seconds")
+  - Waits for the specified time before retrying
+  - Prevents hitting rate limits with configurable `PROCESSING_DELAY`
+
+### Rate Limiting & Flood Control
+
+**Problem:** When forwarding/uploading many files at once, Telegram may rate limit the bot.
+
+**Solution:** Bot now handles flood control automatically:
+- Detects rate limit errors
+- Waits for the time specified by Telegram
+- Retries automatically after waiting
+- Configurable delay between files (`PROCESSING_DELAY`)
+
+**Configuration:**
+```env
+# Increase delay if processing many files at once
+PROCESSING_DELAY=2.0  # 2 seconds between files (default: 1.0)
+```
+
+**For large batches (50+ files):**
+- Set `PROCESSING_DELAY=2.0` or `3.0` in `.env`
+- This spaces out requests to avoid rate limits
+- Bot will still process all files, just slower
 
 ## Notes
 
@@ -213,16 +337,15 @@ If you see "Permission denied" errors:
 
 ## Differences from Caption Bot
 
-| Feature | Caption Bot | Name Bot |
-|---------|-------------|----------|
-| Photo handling | ❌ Buggy | ✅ Fixed |
+| Feature        | Caption Bot      | Name Bot             |
+| -------------- | ---------------- | -------------------- |
+| Photo handling | ❌ Buggy         | ✅ Fixed             |
 | Groups support | ❌ Channels only | ✅ Channels & Groups |
-| Retry logic | ❌ No retries | ✅ Automatic retries |
-| Status command | ❌ No | ✅ Yes |
-| Error messages | ⚠️ Basic | ✅ Detailed |
-| Delay handling | ❌ None | ✅ 0.5s delay |
+| Retry logic    | ❌ No retries    | ✅ Automatic retries |
+| Status command | ❌ No            | ✅ Yes               |
+| Error messages | ⚠️ Basic         | ✅ Detailed          |
+| Delay handling | ❌ None          | ✅ 0.5s delay        |
 
 ## License
 
 This project is part of the Telegram Bot Library collection.
-

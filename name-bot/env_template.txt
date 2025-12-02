@@ -21,3 +21,29 @@ RETRY_DELAY=1.0
 # Optional: Maximum number of retry attempts
 MAX_RETRIES=3
 
+# Optional: Skip adding caption when original filename is not available
+# If true, bot won't add caption for mobile uploads where Telegram doesn't provide filename
+# If false, bot will use generated filename (file_id based) as caption
+SKIP_IF_NO_FILENAME=false
+
+# Optional: Delay between processing files (in seconds)
+# Increase this if processing many files at once to avoid rate limits
+# Recommended values:
+#   - 1.0 second: For <50 files
+#   - 2.0 seconds: For 50-100 files (default, optimized for 100 files)
+#   - 3.0 seconds: For 100+ files
+PROCESSING_DELAY=2.0
+
+# Optional: Retry configuration (optimized for large batches)
+# Delay between retries when errors occur
+RETRY_DELAY=2.0
+
+# Optional: Maximum retry attempts (increased for flood control)
+# Higher value = more attempts before giving up (useful for rate limits)
+MAX_RETRIES=5
+
+# Optional: Flood control retry delay multiplier
+# When flood control is hit, wait this multiplier × requested time
+# 1.5 = wait 50% longer than Telegram requests (safer)
+FLOOD_RETRY_DELAY_MULTIPLIER=1.5
+

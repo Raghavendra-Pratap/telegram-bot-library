@@ -18,7 +18,8 @@ from telegram.error import (
     TimedOut,
     TelegramError,
     BadRequest,
-    Forbidden
+    Forbidden,
+    RetryAfter
 )
 
 from config import (
@@ -26,7 +27,10 @@ from config import (
     ENABLE_USER_VERIFICATION,
     ALLOWED_USER_IDS,
     RETRY_DELAY,
-    MAX_RETRIES
+    MAX_RETRIES,
+    SKIP_IF_NO_FILENAME,
+    PROCESSING_DELAY,
+    FLOOD_RETRY_DELAY_MULTIPLIER
 )
 
 # Configure logging
@@ -130,6 +134,8 @@ This bot automatically adds the filename as caption when you upload files to cha
 /start - Show this message
 /help - Get help
 /status - Check bot status
+/process_recent [N] - Process recent messages to add captions
+/add_caption <msg_id> - Add caption to specific message
 
 *Note:*
 • The bot must be an admin in the channel/group
@@ -189,6 +195,145 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
 
 
+async def process_recent_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /process_recent command - process recent messages to add captions"""
+    # Check authorization
+    if not await check_authorization(update, context):
+        return
+    
+    try:
+        chat = update.effective_chat
+        
+        # Check if bot is admin
+        bot_member = await context.bot.get_chat_member(chat.id, context.bot.id)
+        is_admin = bot_member.status in ['administrator', 'creator']
+        
+        if not is_admin:
+            await update.message.reply_text(
+                "❌ Bot must be admin to process messages.\n\n"
+                "Add bot as admin and try again.",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+        
+        # Get number of messages to process (default: 50)
+        limit = 50
+        if context.args and context.args[0].isdigit():
+            limit = min(int(context.args[0]), 100)  # Max 100 at a time
+        
+        await update.message.reply_text(
+            f"⏳ Processing last {limit} messages...\n"
+            f"This may take a while. I'll update you when done.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+        processed = 0
+        added = 0
+        skipped = 0
+        errors = 0
+        
+        try:
+            # Get recent messages
+            # Note: python-telegram-bot doesn't have direct get_chat_history
+            # We'll need to use a workaround or iterate through updates
+            # For now, we'll process messages that come in
+            
+            # Alternative: Use getUpdates and process, but that's not ideal
+            # Better: Use Chat.get_messages() if available
+            
+            # Since we can't easily get old messages with python-telegram-bot,
+            # we'll provide instructions instead
+            await update.message.reply_text(
+                "ℹ️ *Processing Old Messages*\n\n"
+                "To process old messages, you can:\n\n"
+                "1. **Forward files** to the channel/group\n"
+                "   - Bot will automatically add captions to forwarded files\n"
+                "   - Works if original file had filename\n\n"
+                "2. **Use message ID** (if you know it):\n"
+                "   - Use `/add_caption <message_id>`\n"
+                "   - Get message ID from message info\n\n"
+                "3. **Re-upload files** (if needed):\n"
+                "   - Download and re-upload files with proper names\n\n"
+                "*Note:* Telegram API limits access to old messages. "
+                "Forwarding is the easiest solution.",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            
+        except Exception as e:
+            logger.error(f"Error processing recent messages: {str(e)}")
+            await update.message.reply_text(
+                f"❌ Error: {str(e)}\n\n"
+                "Make sure bot has proper permissions.",
+                parse_mode=ParseMode.MARKDOWN
+            )
+    
+    except Exception as e:
+        logger.error(f"Error in process_recent command: {str(e)}")
+        await update.message.reply_text(
+            f"❌ Error: {str(e)}",
+            parse_mode=ParseMode.MARKDOWN
+        )
+
+
+async def add_caption_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /add_caption command - add caption to specific message by ID"""
+    # Check authorization
+    if not await check_authorization(update, context):
+        return
+    
+    if not context.args or not context.args[0].isdigit():
+        await update.message.reply_text(
+            "❌ *Usage:* `/add_caption <message_id>`\n\n"
+            "Get message ID from message info (right-click → Copy Message Link, "
+            "or use @userinfobot to get message details).",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    
+    try:
+        message_id = int(context.args[0])
+        chat_id = update.effective_chat.id
+        
+        # Try to get the message
+        try:
+            message = await context.bot.get_chat_member(chat_id, message_id)
+            # Actually, we need to get the message differently
+            # python-telegram-bot doesn't have direct get_message
+            # We need to use a workaround
+            
+            await update.message.reply_text(
+                "ℹ️ *Adding Caption to Message*\n\n"
+                "To add caption to a specific message:\n\n"
+                "1. **Reply to the message** with `/add_caption`\n"
+                "   (This feature will be added)\n\n"
+                "2. **Forward the file** instead\n"
+                "   - Bot will automatically add caption\n\n"
+                "3. **Re-upload the file** with proper name\n\n"
+                "*Note:* Direct message access by ID is limited by Telegram API. "
+                "Forwarding is recommended.",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            
+        except Exception as e:
+            logger.error(f"Error getting message {message_id}: {str(e)}")
+            await update.message.reply_text(
+                f"❌ Could not access message {message_id}.\n\n"
+                "Make sure:\n"
+                "• Bot is admin in this chat\n"
+                "• Message ID is correct\n"
+                "• Message is not too old (48h limit for editing)\n\n"
+                "**Alternative:** Forward the file - bot will add caption automatically.",
+                parse_mode=ParseMode.MARKDOWN
+            )
+    
+    except Exception as e:
+        logger.error(f"Error in add_caption command: {str(e)}")
+        await update.message.reply_text(
+            f"❌ Error: {str(e)}",
+            parse_mode=ParseMode.MARKDOWN
+        )
+
+
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /status command - check bot status"""
     # Check authorization
@@ -244,27 +389,62 @@ def extract_file_info(message):
     """
     # Check for video
     if message.video:
-        file_name = message.video.file_name or f"video_{message.video.file_id}.mp4"
+        # Try to get filename from video object
+        file_name = message.video.file_name
+        # If no filename, check if it was sent as document (mobile uploads sometimes do this)
+        if not file_name and message.document:
+            file_name = message.document.file_name
+        # If still no filename, use fallback
+        if not file_name:
+            # Try to extract extension from mime_type if available
+            ext = ".mp4"
+            if message.video.mime_type:
+                # Extract extension from mime_type (e.g., "video/mp4" -> "mp4")
+                mime_parts = message.video.mime_type.split('/')
+                if len(mime_parts) > 1:
+                    ext = f".{mime_parts[1].split(';')[0]}"
+            file_name = f"video_{message.video.file_id}{ext}"
         return file_name, "video"
     
     # Check for document
     if message.document:
-        file_name = message.document.file_name or f"document_{message.document.file_id}"
+        file_name = message.document.file_name
+        # If no filename, try to extract from mime_type
+        if not file_name:
+            ext = ""
+            if message.document.mime_type:
+                # Try to get extension from mime_type
+                mime_parts = message.document.mime_type.split('/')
+                if len(mime_parts) > 1:
+                    ext = f".{mime_parts[1].split(';')[0]}"
+            file_name = f"document_{message.document.file_id}{ext}"
         return file_name, "document"
     
     # Check for photo (photos don't have document attribute - they're separate)
     if message.photo:
         # Photos don't have file_name, so we generate one
-        # Try to get original filename if sent as document
-        file_name = f"photo_{message.photo[-1].file_id}.jpg"
+        # Try to get original filename if sent as document (some mobile apps do this)
+        file_name = None
+        if message.document:
+            file_name = message.document.file_name
+        if not file_name:
+            file_name = f"photo_{message.photo[-1].file_id}.jpg"
         return file_name, "photo"
     
     # Check for audio
     if message.audio:
-        file_name = message.audio.file_name or (
-            f"{message.audio.title or 'audio'}_{message.audio.file_id}.mp3" 
-            if message.audio.title else f"audio_{message.audio.file_id}.mp3"
-        )
+        file_name = message.audio.file_name
+        # If no filename, try to use title or performer
+        if not file_name:
+            parts = []
+            if message.audio.performer:
+                parts.append(message.audio.performer)
+            if message.audio.title:
+                parts.append(message.audio.title)
+            if parts:
+                file_name = f"{' - '.join(parts)}_{message.audio.file_id}.mp3"
+            else:
+                file_name = f"audio_{message.audio.file_id}.mp3"
         return file_name, "audio"
     
     # Check for voice message
@@ -308,7 +488,12 @@ async def edit_message_caption_with_retry(message, caption_text, max_retries=MAX
             # If message doesn't support captions or other permanent error
             if "message can't be edited" in error_msg or "message not found" in error_msg:
                 logger.warning(f"Message cannot be edited: {str(e)}")
-                return False
+                # Return a special value to indicate we should try repost
+                return "REPOST"
+            # Check for other permanent errors
+            if "too old" in error_msg or "48 hours" in error_msg:
+                logger.warning(f"Message too old to edit: {str(e)}")
+                return "REPOST"
             # Retry on other BadRequest errors
             if attempt < max_retries - 1:
                 logger.warning(f"Retry {attempt + 1}/{max_retries} after error: {str(e)}")
@@ -331,14 +516,72 @@ async def edit_message_caption_with_retry(message, caption_text, max_retries=MAX
             logger.error(f"Permission denied: {str(e)}")
             return False
         
-        except Exception as e:
-            # Other errors - retry
-            if attempt < max_retries - 1:
-                logger.warning(f"Unexpected error, retry {attempt + 1}/{max_retries}: {str(e)}")
-                await asyncio.sleep(delay)
+        except TelegramError as e:
+            error_msg = str(e)
+            # Check for flood control / rate limiting
+            if "flood" in error_msg.lower() or "rate limit" in error_msg.lower() or "429" in error_msg:
+                # Try to extract retry time from error message
+                import re
+                retry_match = re.search(r'retry in (\d+) seconds?', error_msg, re.IGNORECASE)
+                if retry_match:
+                    wait_time = int(retry_match.group(1))
+                    # Add multiplier for safety (wait a bit longer to avoid immediate re-rate-limiting)
+                    adjusted_wait = int(wait_time * FLOOD_RETRY_DELAY_MULTIPLIER)
+                    logger.warning(f"Flood control: Rate limit exceeded. Waiting {adjusted_wait} seconds (requested: {wait_time}s)...")
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(adjusted_wait)
+                        # Continue to retry after waiting
+                    else:
+                        logger.error(f"Flood control after {max_retries} attempts. Need to wait {adjusted_wait} seconds.")
+                        return "FLOOD_WAIT"  # Signal that we need to wait
+                else:
+                    # Default wait time if can't parse (usually 30-60 seconds)
+                    wait_time = 30
+                    adjusted_wait = int(wait_time * FLOOD_RETRY_DELAY_MULTIPLIER)
+                    logger.warning(f"Flood control detected (unparseable): Waiting {adjusted_wait} seconds...")
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(adjusted_wait)
+                    else:
+                        return "FLOOD_WAIT"
             else:
-                logger.error(f"Unexpected error after {max_retries} attempts: {str(e)}")
-                return False
+                # Other TelegramError - re-raise to be handled by general Exception handler
+                raise
+        
+        except Exception as e:
+            error_msg = str(e).lower()
+            # Check if it's a flood control error (sometimes comes as generic exception)
+            if "flood" in error_msg or "rate limit" in error_msg or "429" in error_msg:
+                # Try to extract retry time from error message
+                import re
+                retry_match = re.search(r'retry in (\d+) seconds?', error_msg, re.IGNORECASE)
+                if retry_match:
+                    wait_time = int(retry_match.group(1))
+                    # Add multiplier for safety
+                    adjusted_wait = int(wait_time * FLOOD_RETRY_DELAY_MULTIPLIER)
+                    logger.warning(f"Flood control detected: Waiting {adjusted_wait} seconds (requested: {wait_time}s)...")
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(adjusted_wait)
+                        # Continue to retry after waiting
+                    else:
+                        logger.error(f"Flood control after {max_retries} attempts. Need to wait {adjusted_wait} seconds.")
+                        return "FLOOD_WAIT"
+                else:
+                    # Default wait time if can't parse
+                    wait_time = 30
+                    adjusted_wait = int(wait_time * FLOOD_RETRY_DELAY_MULTIPLIER)
+                    logger.warning(f"Flood control detected (unparseable): Waiting {adjusted_wait} seconds...")
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(adjusted_wait)
+                    else:
+                        return "FLOOD_WAIT"
+            else:
+                # Other errors - retry
+                if attempt < max_retries - 1:
+                    logger.warning(f"Unexpected error, retry {attempt + 1}/{max_retries}: {str(e)}")
+                    await asyncio.sleep(delay)
+                else:
+                    logger.error(f"Unexpected error after {max_retries} attempts: {str(e)}")
+                    return False
     
     return False
 
@@ -450,6 +693,43 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # No file detected
         return
     
+    # Log what we extracted for debugging
+    logger.debug(f"Extracted file info - Type: {file_type}, Name: {file_name}")
+    
+    # Check if filename looks like a generated file_id (starts with type_ and contains long alphanumeric string)
+    # This indicates Telegram didn't provide the original filename
+    is_generated_name = file_name.startswith(f"{file_type}_") and len(file_name.split('_')[1].split('.')[0]) > 20
+    
+    if is_generated_name:
+        logger.warning(
+            f"⚠️ Original filename not available for {file_type}. "
+            f"Telegram didn't provide file_name attribute. "
+            f"This often happens with mobile uploads when files are sent directly from gallery/camera."
+        )
+        
+        # If configured to skip when no filename, don't add caption
+        if SKIP_IF_NO_FILENAME:
+            logger.info(f"Skipping caption addition - original filename not available and SKIP_IF_NO_FILENAME is enabled")
+            return
+        
+        logger.info(f"Using generated filename: {file_name}")
+        
+        # Try to get more info from the file object
+        try:
+            file_obj = None
+            if file_type == "video" and message.video:
+                file_obj = message.video
+            elif file_type == "document" and message.document:
+                file_obj = message.document
+            elif file_type == "photo" and message.photo:
+                file_obj = message.photo[-1]
+            
+            if file_obj:
+                # Check if there's any additional metadata
+                logger.debug(f"File object details - file_id: {file_obj.file_id}, file_unique_id: {getattr(file_obj, 'file_unique_id', 'N/A')}")
+        except Exception as e:
+            logger.debug(f"Could not get additional file info: {str(e)}")
+    
     # Skip file types that don't support captions
     if file_type in ["video_note", "sticker"]:
         logger.debug(f"Skipping {file_type} - doesn't support captions")
@@ -461,8 +741,9 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(caption_text) > 200:
         caption_text = file_name[:197] + "..."
     
-    # Add a small delay to ensure message is fully processed by Telegram
-    await asyncio.sleep(0.5)
+    # Add a delay to ensure message is fully processed by Telegram and avoid rate limits
+    # PROCESSING_DELAY helps prevent hitting Telegram's rate limits when processing many files
+    await asyncio.sleep(PROCESSING_DELAY)
     
     try:
         chat_title = message.chat.title or f"Chat {message.chat.id}"
@@ -472,15 +753,63 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # In groups, bots can only edit their own messages
         is_group = chat_type in [ChatType.GROUP, ChatType.SUPERGROUP]
         is_bot_message = message.from_user and message.from_user.id == context.bot.id
+        is_forwarded = message.forward_from or message.forward_from_chat or message.forward_sender_name
+        
+        # Check message age (Telegram allows editing only within 48 hours)
+        message_age_hours = None
+        if message.date:
+            from datetime import datetime, timezone
+            now = datetime.now(timezone.utc)
+            message_time = message.date
+            age_delta = now - message_time
+            message_age_hours = age_delta.total_seconds() / 3600
+        
+        # Determine if we should use repost method
+        use_repost = False
+        repost_reason = None
         
         if is_group and not is_bot_message:
             # In groups, we can't edit other users' messages
-            # Use workaround: delete and repost with caption
-            logger.info(f"Group message from another user - using repost workaround")
+            use_repost = True
+            repost_reason = "Group message from another user"
+            logger.info(f"{repost_reason} - using repost workaround")
+        elif message_age_hours and message_age_hours > 48:
+            # Message is too old to edit (Telegram 48-hour limit)
+            use_repost = True
+            repost_reason = f"Message too old ({message_age_hours:.1f}h > 48h limit)"
+            logger.warning(f"{repost_reason} - using repost workaround")
+        elif is_forwarded and is_group:
+            # Forwarded messages in groups from other users often can't be edited
+            use_repost = True
+            repost_reason = "Forwarded message in group"
+            logger.info(f"{repost_reason} - using repost workaround")
+        elif message_age_hours and message_age_hours > 24:
+            # Message is getting old, try edit first, fallback to repost
+            logger.info(f"Message is {message_age_hours:.1f} hours old - trying edit first")
+        
+        if use_repost:
+            # Use repost method: delete and repost with caption
             success = await repost_file_with_caption(context, message, file_type, caption_text)
         else:
-            # In channels or bot's own messages in groups, we can edit directly
-            success = await edit_message_caption_with_retry(message, caption_text)
+            # Try to edit directly first
+            edit_result = await edit_message_caption_with_retry(message, caption_text)
+            
+            # Check if edit returned "REPOST" signal (message can't be edited)
+            if edit_result == "REPOST":
+                logger.info(f"Edit not possible (message can't be edited), using repost workaround")
+                success = await repost_file_with_caption(context, message, file_type, caption_text)
+            elif edit_result == "FLOOD_WAIT":
+                # Flood control - wait longer before trying repost
+                logger.warning(f"Rate limited, waiting 30 seconds before trying repost...")
+                await asyncio.sleep(30)
+                success = await repost_file_with_caption(context, message, file_type, caption_text)
+            elif edit_result is True:
+                success = True
+            else:
+                # Edit failed for other reason, try repost as fallback
+                # This handles cases where edit fails unexpectedly
+                logger.info(f"Edit failed, trying repost workaround as fallback")
+                success = await repost_file_with_caption(context, message, file_type, caption_text)
         
         if success:
             logger.info(f"✅ Successfully added caption: {file_name}")
@@ -526,6 +855,8 @@ def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("status", status_command))
+    application.add_handler(CommandHandler("process_recent", process_recent_command))
+    application.add_handler(CommandHandler("add_caption", add_caption_command))
     
     # Handle all file types in channels and groups
     # Use filters to listen to both channels and groups
