@@ -1,0 +1,23 @@
+# Telegram Bot Configuration
+# Copy this file to .env and fill in your values
+
+# Required: Your Telegram Bot Token
+# Get it from @BotFather on Telegram
+TELEGRAM_BOT_TOKEN=your_bot_token_here
+
+# Optional: User Access Control
+# Set to true to restrict bot usage to specific users
+ENABLE_USER_VERIFICATION=false
+
+# Optional: Allowed User IDs (comma-separated)
+# Only used if ENABLE_USER_VERIFICATION=true
+# Get your user ID from @userinfobot on Telegram
+ALLOWED_USER_IDS=
+
+# Optional: Retry Configuration
+# Delay between retries when editing messages (in seconds)
+RETRY_DELAY=1.0
+
+# Optional: Maximum number of retry attempts
+MAX_RETRIES=3
+
