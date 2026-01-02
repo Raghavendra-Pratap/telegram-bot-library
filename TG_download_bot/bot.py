@@ -422,17 +422,8 @@ async def adduser_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     user_id = update.effective_user.id
     
-    # Check if user is admin
-    if not is_admin(user_id):
-        await update.message.reply_text(
-            "🚫 *Access Denied*\n\n"
-            "Only admins can add users.\n\n"
-            "Contact an admin to get access.",
-            parse_mode=ParseMode.MARKDOWN
-        )
-        return
-    
     # Check if this is the first admin (no admins exist yet)
+    # This must be checked BEFORE the admin check to allow bootstrap
     if len(user_manager.get_admin_users()) == 0:
         user_manager.set_initial_admin(user_id)
         await update.message.reply_text(
@@ -442,6 +433,16 @@ async def adduser_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• /removeuser - Remove a user\n"
             "• /listusers - List all users\n"
             "• /addadmin - Make someone admin",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    
+    # Check if user is admin (only after bootstrap check)
+    if not is_admin(user_id):
+        await update.message.reply_text(
+            "🚫 *Access Denied*\n\n"
+            "Only admins can add users.\n\n"
+            "Contact an admin to get access.",
             parse_mode=ParseMode.MARKDOWN
         )
         return

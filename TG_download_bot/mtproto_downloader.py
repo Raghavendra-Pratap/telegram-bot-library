@@ -82,7 +82,7 @@ class PremiumDownloader:
             file_size = file.file_size or 0
             file_type = "audio"
         elif message.photo:
-            file = message.photo  # Get largest photo
+            file = message.photo[-1]  # Get largest photo
             file_name = f"photo_{message.id}.jpg"
             file_size = file.file_size or 0
             file_type = "photo"
@@ -98,8 +98,13 @@ class PremiumDownloader:
             file_type = "voice"
         elif message.sticker:
             file = message.sticker
-            # Stickers are usually .webp or .tgs
-            ext = ".webp" if not file.is_animated else ".tgs"
+            # Stickers can be .webp (static), .tgs (animated), or .webm (video)
+            if hasattr(file, 'is_video') and file.is_video:
+                ext = ".webm"
+            elif hasattr(file, 'is_animated') and file.is_animated:
+                ext = ".tgs"
+            else:
+                ext = ".webp"
             file_name = f"sticker_{message.id}{ext}"
             file_size = file.file_size or 0
             file_type = "sticker"
