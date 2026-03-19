@@ -2,6 +2,8 @@
 
 A Telegram bot that uses a **premium account with MTProto** to download files at premium speeds and provide fast download links for non-premium users.
 
+> **Branch status:** Under development. Available on `development` branch only.
+
 ## Features
 
 - ⚡ **Premium download speeds** - Uses MTProto with premium account (5-10x faster)
@@ -28,10 +30,13 @@ A Telegram bot that uses a **premium account with MTProto** to download files at
 
 ## Setup
 
-### 1. Install Dependencies
+### 1. Install Dependencies (Shared)
 
 ```bash
-pip install -r requirements.txt
+# From repo root
+./scripts/setup_env.sh
+./scripts/install_deps.sh tg-download
+source .venv/bin/activate
 ```
 
 ### 2. Get API Credentials

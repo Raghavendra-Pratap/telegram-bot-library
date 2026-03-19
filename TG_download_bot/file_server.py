@@ -20,6 +20,7 @@ class FileServer:
     def __init__(self):
         self.file_store: Dict[str, dict] = {}
         self.app = web.Application()
+        self._base_url: Optional[str] = None  # Set in start() so links use actual port
         self.app.router.add_get('/download/{token}', self.download_handler)
         self.app.router.add_get('/health', self.health_handler)
         self.runner: Optional[web.AppRunner] = None
@@ -41,8 +42,11 @@ class FileServer:
             'created_at': time.time()
         }
         
-        from config import FILE_SERVER_BASE_URL
-        full_url = f"{FILE_SERVER_BASE_URL}/download/{token}"
+        base_url = self._base_url
+        if base_url is None:
+            from config import FILE_SERVER_BASE_URL
+            base_url = FILE_SERVER_BASE_URL
+        full_url = f"{base_url}/download/{token}"
         
         logger.info(f"Generated download link for {filename} (expires in {FILE_RETENTION_HOURS}h)")
         return token, full_url
@@ -118,8 +122,10 @@ class FileServer:
             del self.file_store[token]
             logger.debug(f"Removed expired token: {token}")
     
-    async def start(self, host: str, port: int):
-        """Start the file server"""
+    async def start(self, host: str, port: int, base_url: Optional[str] = None):
+        """Start the file server. base_url: URL for download links (e.g. http://localhost:PORT); if not set, uses config FILE_SERVER_BASE_URL."""
+        if base_url is not None:
+            self._base_url = base_url.rstrip('/')
         self.runner = web.AppRunner(self.app)
         await self.runner.setup()
         site = web.TCPSite(self.runner, host, port)

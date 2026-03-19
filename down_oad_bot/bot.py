@@ -51,7 +51,7 @@ downloaders = {
     Platform.REDDIT: RedditDownloader(DOWNLOAD_DIR),
     Platform.TWITTER: TwitterDownloader(DOWNLOAD_DIR),
     Platform.INSTAGRAM: InstagramDownloader(DOWNLOAD_DIR),
-    # Platform.THREADS: ThreadsDownloader(DOWNLOAD_DIR),  # Disabled for now
+    Platform.THREADS: ThreadsDownloader(DOWNLOAD_DIR),
     Platform.GIF: GIFDownloader(DOWNLOAD_DIR),
 }
 
@@ -573,6 +573,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         'reddit': Platform.REDDIT,
         'twitter': Platform.TWITTER,
         'instagram': Platform.INSTAGRAM,
+        'threads': Platform.THREADS,
         'gif': Platform.GIF,
     }
     

@@ -41,9 +41,7 @@ class URLDetector:
             r'(?:https?://)?(?:www\.)?reddit\.com/r/\w+/comments/[a-zA-Z0-9_]+',
             r'(?:https?://)?(?:www\.)?redd\.it/([a-zA-Z0-9_]+)',
         ],
-        Platform.TIKTOK: [
-            r'(?:https?://)?(?:www\.)?(?:vm\.|vt\.)?tiktok\.com/([a-zA-Z0-9]+)',
-        ],
+        # TIKTOK: disabled (not supported in our region; plan support later)
         Platform.THREADS: [
             r'(?:https?://)?(?:www\.)?threads\.(?:net|com)/@[\w.]+/post/([a-zA-Z0-9_-]+)',
             r'(?:https?://)?(?:www\.)?threads\.(?:net|com)/t/([a-zA-Z0-9_-]+)',

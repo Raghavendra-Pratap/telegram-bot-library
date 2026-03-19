@@ -14,18 +14,11 @@ echo ""
 echo "Checking Python version..."
 python3 --version || { echo "❌ Python 3 not found. Please install Python 3.8 or higher."; exit 1; }
 
-# Create virtual environment
-echo "Creating virtual environment..."
-python3 -m venv venv
-
-# Activate virtual environment
-echo "Activating virtual environment..."
-source venv/bin/activate
-
-# Install dependencies
-echo "Installing dependencies..."
-pip install --upgrade pip
-pip install -r requirements.txt
+# Use shared virtual environment at repo root
+ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+echo "Preparing shared virtual environment..."
+"${ROOT_DIR}/scripts/setup_env.sh"
+"${ROOT_DIR}/scripts/install_deps.sh" down_oad
 
 # Check FFmpeg
 echo "Checking FFmpeg..."

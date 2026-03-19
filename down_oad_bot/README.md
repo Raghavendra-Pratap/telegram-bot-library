@@ -2,6 +2,8 @@
 
 A comprehensive Telegram bot that allows you to download videos from multiple platforms including YouTube, Reddit, Twitter/X, Instagram, and GIF platforms.
 
+> **Branch status:** Under development. Available on `development` branch only.
+
 ## Features
 
 - 🎬 **Multi-Platform Support**
@@ -37,15 +39,15 @@ A comprehensive Telegram bot that allows you to download videos from multiple pl
 cd Telegram_Bot_Library
 ```
 
-2. **Create a virtual environment (recommended):**
+2. **Create a shared virtual environment (recommended):**
 ```bash
-python3 -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+./scripts/setup_env.sh
 ```
 
-3. **Install dependencies:**
+3. **Install dependencies for this bot:**
 ```bash
-pip install -r requirements.txt
+./scripts/install_deps.sh down_oad
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 ```
 
 4. **Install FFmpeg** (if not already installed):
@@ -62,7 +64,7 @@ sudo apt-get update && sudo apt-get install ffmpeg
 
 5. **Set up environment variables:**
 ```bash
-cp .env.example .env
+cp env_template.txt .env
 ```
 
 Edit `.env` and add your Telegram Bot Token:
@@ -122,7 +124,7 @@ Telegram_Bot_Library/
 ├── bot.py                 # Main bot file
 ├── config.py              # Configuration management
 ├── requirements.txt       # Python dependencies
-├── .env.example           # Environment variables template
+├── env_template.txt       # Environment variables template (copy to .env)
 ├── .gitignore            # Git ignore file
 ├── downloaders/          # Platform-specific downloaders
 │   ├── __init__.py

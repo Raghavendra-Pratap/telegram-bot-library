@@ -2,6 +2,8 @@
 
 A Telegram bot that automatically sets the filename as the caption when files are uploaded.
 
+> **Branch status:** Under development. Available on `development` branch only.
+
 ## Features
 
 - Automatically extracts filename from uploaded files
@@ -13,13 +15,13 @@ A Telegram bot that automatically sets the filename as the caption when files ar
 
 ## Setup
 
-### 1. Install Dependencies
+### 1. Install Dependencies (Shared)
 
 ```bash
-cd caption_bot
-python3 -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-pip install -r requirements.txt
+# From repo root
+./scripts/setup_env.sh
+./scripts/install_deps.sh caption
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 ```
 
 ### 2. Configure Environment Variables
@@ -49,22 +51,33 @@ python bot.py
 
 ## Usage
 
-### Basic Usage (Send files back to you)
+### Quick Start
 
-1. Start a chat with your bot
-2. Upload any file (video, document, photo, audio, etc.)
-3. The bot will automatically:
-   - Extract the filename
-   - Send the file back with the filename as the caption
+1. **Set your channel** (required):
+   ```
+   /setchannel @your_channel
+   ```
+   Or use channel ID:
+   ```
+   /setchannel -1001234567890
+   ```
 
-### Upload to Channel
+2. **Make sure the bot is an admin** in your channel (required for posting)
 
-1. Set a channel using `/setchannel @your_channel` or `/setchannel -1001234567890`
-2. Make sure the bot is an admin in the channel
-3. Upload any file
-4. The bot will automatically:
-   - Extract the filename
-   - Upload to your channel with the filename as the caption
+3. **Upload any file** to the bot
+
+4. **Done!** The bot automatically:
+   - Extracts the filename
+   - Uploads to your channel instantly
+   - Adds filename as caption
+   - **Single upload** - file is uploaded once, no re-uploading!
+
+### How It Works
+
+- When you upload a file to the bot, it immediately forwards it to your channel
+- The bot uses Telegram's `file_id` system - the file is uploaded **once** to Telegram's servers
+- The bot then references that file and sends it to your channel with the filename as caption
+- No downloading, no re-uploading - instant and efficient!
 
 ## Commands
 

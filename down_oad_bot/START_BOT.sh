@@ -10,26 +10,33 @@ cd "$SCRIPT_DIR"
 echo "🎬 Starting Telegram Video Downloader Bot..."
 echo ""
 
+# Use shared virtual environment at repo root
+ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+VENV_DIR="${ROOT_DIR}/.venv"
+
 # Check if virtual environment exists
-if [ ! -d "venv" ]; then
-    echo "❌ Virtual environment not found!"
-    echo "Run: python3 -m venv venv && source venv/bin/activate && pip install -r requirements.txt"
+if [ ! -d "${VENV_DIR}" ]; then
+    echo "❌ Shared virtual environment not found!"
+    echo "Run: ${ROOT_DIR}/scripts/setup_env.sh"
+    echo "Then: ${ROOT_DIR}/scripts/install_deps.sh down_oad"
     exit 1
 fi
 
 # Determine Python executable in venv
-if [ -f "venv/bin/python" ]; then
-    PYTHON_CMD="venv/bin/python"
-elif [ -f "venv/bin/python3" ]; then
-    PYTHON_CMD="venv/bin/python3"
+if [ -f "${VENV_DIR}/bin/python" ]; then
+    PYTHON_CMD="${VENV_DIR}/bin/python"
+elif [ -f "${VENV_DIR}/bin/python3" ]; then
+    PYTHON_CMD="${VENV_DIR}/bin/python3"
 else
     echo "❌ Python not found in venv!"
-    echo "Run: python3 -m venv venv && source venv/bin/activate && pip install -r requirements.txt"
+    echo "Run: ${ROOT_DIR}/scripts/setup_env.sh"
+    echo "Then: ${ROOT_DIR}/scripts/install_deps.sh down_oad"
     exit 1
 fi
 
 # Activate virtual environment (for PATH and other env vars)
-source venv/bin/activate
+# shellcheck source=/dev/null
+source "${VENV_DIR}/bin/activate"
 
 # Check if .env exists
 if [ ! -f ".env" ]; then

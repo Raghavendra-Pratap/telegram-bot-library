@@ -2,6 +2,8 @@
 
 A comprehensive Telegram bot for uploading files with folder structure metadata, CSV/Google Sheets integration, flexible grouping, and channel selection.
 
+> **Branch status:** Under development. Available on `development` branch only.
+
 ## Features
 
 - 📁 **Folder Structure Metadata**: Automatically includes directory tree paths in file captions
@@ -27,15 +29,15 @@ A comprehensive Telegram bot for uploading files with folder structure metadata,
 cd upload_bot
 ```
 
-2. **Create a virtual environment (recommended):**
+2. **Create a shared virtual environment (recommended):**
 ```bash
-python3 -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+./scripts/setup_env.sh
 ```
 
-3. **Install dependencies:**
+3. **Install dependencies for this bot:**
 ```bash
-pip install -r requirements.txt
+./scripts/install_deps.sh upload
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 ```
 
 4. **Set up environment variables:**

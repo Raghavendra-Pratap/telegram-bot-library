@@ -2,6 +2,7 @@
 YouTube and YouTube Shorts downloader using yt-dlp
 """
 import yt_dlp
+from yt_dlp.utils import DownloadError
 import time
 import re
 from pathlib import Path
@@ -71,70 +72,79 @@ class YouTubeDownloader(BaseDownloader):
         
         return opts
     
+    def _do_download(
+        self,
+        url: str,
+        quality: str,
+        audio_only: bool,
+        before_download: float,
+        postprocessor_hook,
+    ) -> Optional[Path]:
+        """Perform one download attempt with given quality. Returns path or None."""
+        ydl_opts = self._get_ydl_opts(self.download_dir, quality, audio_only)
+        ydl_opts['progress_hooks'] = [postprocessor_hook]
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            title = info.get('title', 'video')
+            video_id = info.get('id', '')
+            logger.info(f"Downloading YouTube video: {title}")
+            ydl.download([url])
+        time.sleep(0.5)
+        downloaded_file = self.find_downloaded_file(before_download, video_id)
+        return downloaded_file
+    
     def download(
         self, 
         url: str, 
         quality: str = "best",
         audio_only: bool = False
     ) -> Optional[Path]:
-        """Download YouTube video"""
-        try:
-            # Store the actual filename from yt-dlp
-            downloaded_filename = None
-            
-            def postprocessor_hook(d):
-                """Hook to capture the final filename after processing"""
-                nonlocal downloaded_filename
-                if d['status'] == 'finished':
-                    downloaded_filename = d.get('filename')
-                    logger.info(f"Post-processed file: {downloaded_filename}")
-            
-            # Get current time to find recently created files
-            before_download = time.time()
-            
-            ydl_opts = self._get_ydl_opts(self.download_dir, quality, audio_only)
-            ydl_opts['progress_hooks'] = [postprocessor_hook]
-            
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                # Get video info first
-                info = ydl.extract_info(url, download=False)
-                title = info.get('title', 'video')
-                video_id = info.get('id', '')
-                
-                # Download
-                logger.info(f"Downloading YouTube video: {title}")
-                ydl.download([url])
-            
-            # Small delay to ensure file system has updated
-            time.sleep(0.5)
-            
-            # Try to find the downloaded file using multiple methods
-            downloaded_file = None
-            video_extensions = ['.mp4', '.webm', '.mkv', '.m4a', '.mp3', '.opus', '.ogg']
-            
-            # Method 1: Use the filename from postprocessor hook
-            if downloaded_filename:
-                downloaded_file = Path(downloaded_filename)
-                if downloaded_file.exists():
-                    logger.info(f"Found file from postprocessor: {downloaded_file}")
-                    return downloaded_file
-            
-            # Method 2: Use base class helper to find downloaded file
-            downloaded_file = self.find_downloaded_file(before_download, video_id)
-            
-            if downloaded_file:
-                logger.info(f"Found downloaded file: {downloaded_file}")
-                return downloaded_file
-            
-            logger.error("Downloaded file not found after all methods")
-            logger.error(f"Download directory contents: {list(self.download_dir.glob('*'))}")
-            return None
-                    
-        except Exception as e:
-            logger.error(f"Error downloading YouTube video: {str(e)}")
-            import traceback
-            logger.error(traceback.format_exc())
-            return None
+        """Download YouTube video. Falls back to 'best' if requested format is unavailable (e.g. YouTube SABR/403)."""
+        downloaded_filename = None
+        
+        def postprocessor_hook(d):
+            nonlocal downloaded_filename
+            if d['status'] == 'finished':
+                downloaded_filename = d.get('filename')
+                logger.info(f"Post-processed file: {downloaded_filename}")
+        
+        before_download = time.time()
+        
+        for attempt_quality in (quality, "best"):
+            try:
+                result = self._do_download(
+                    url, attempt_quality, audio_only, before_download, postprocessor_hook
+                )
+                if result:
+                    if downloaded_filename and Path(downloaded_filename).exists():
+                        return Path(downloaded_filename)
+                    return result
+                if attempt_quality == "best":
+                    break
+            except DownloadError as e:
+                msg = str(e).lower()
+                if "requested format is not available" in msg or "format is not available" in msg:
+                    if attempt_quality != "best":
+                        logger.warning(
+                            f"Requested format {quality} not available (YouTube may have restricted it). "
+                            "Retrying with best available."
+                        )
+                        continue
+                logger.error(f"Error downloading YouTube video: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
+                return None
+            except Exception as e:
+                logger.error(f"Error downloading YouTube video: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
+                return None
+        
+        if downloaded_filename and Path(downloaded_filename).exists():
+            return Path(downloaded_filename)
+        logger.error("Downloaded file not found after all methods")
+        logger.error(f"Download directory contents: {list(self.download_dir.glob('*'))}")
+        return None
     
     def get_video_info(self, url: str) -> Optional[Dict[str, Any]]:
         """Get video information including available formats"""

@@ -31,6 +31,13 @@ else:
 USE_DYNAMIC_USER_MANAGEMENT = os.getenv("USE_DYNAMIC_USER_MANAGEMENT", "true").lower() == "true"
 USERS_FILE = Path(os.getenv("USERS_FILE", "allowed_users.json"))
 
+# Initial Admin User IDs (comma-separated) - Set admins from .env on first run
+INITIAL_ADMIN_USER_IDS = os.getenv("INITIAL_ADMIN_USER_IDS", "").strip()
+if INITIAL_ADMIN_USER_IDS:
+    INITIAL_ADMIN_USER_IDS = [int(uid.strip()) for uid in INITIAL_ADMIN_USER_IDS.split(",") if uid.strip().isdigit()]
+else:
+    INITIAL_ADMIN_USER_IDS = []
+
 # Download Settings
 DOWNLOAD_DIR = Path(os.getenv("DOWNLOAD_DIR", "./downloads"))
 DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)

@@ -22,6 +22,13 @@ USE_DYNAMIC_USER_MANAGEMENT=true
 # File to store allowed users (JSON format)
 USERS_FILE=allowed_users.json
 
+# Initial Admin User IDs (Optional - for setting admins from .env)
+# Comma-separated list of user IDs that should be admins on first run
+# Example: INITIAL_ADMIN_USER_IDS=123456789,987654321
+# If not set, first user to use /adduser becomes admin
+# Get your user ID: Send /start to @getidsbot on Telegram
+INITIAL_ADMIN_USER_IDS=
+
 # Legacy: Hardcoded user IDs (only used if USE_DYNAMIC_USER_MANAGEMENT=false)
 # Comma-separated list of allowed user IDs
 ALLOWED_USER_IDS=
