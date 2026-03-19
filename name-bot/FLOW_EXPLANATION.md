@@ -1,6 +1,6 @@
-# Name Bot - Complete Flow and Functioning Explanation
+# Upload with Caption Bot - Complete Flow and Functioning Explanation
 
-This document explains the entire flow and functioning of the Name Bot, from startup to file processing.
+This document explains the entire flow and functioning of the Upload with Caption Bot, from startup to file processing.
 
 ---
 
@@ -469,7 +469,7 @@ Attempt 3 → Error → Give up
 
 ## 🎯 Summary
 
-The Name Bot works by:
+The Upload with Caption Bot works by:
 
 1. **Listening** for file uploads in channels/groups
 2. **Detecting** file type and extracting filename

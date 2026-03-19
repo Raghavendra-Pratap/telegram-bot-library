@@ -1,6 +1,13 @@
-# Name Bot
+# Upload with Caption Bot
 
 A Telegram bot that automatically adds the filename as caption when files are uploaded to channels or groups.
+
+**Bot Username:** [@uploadwithcaption_bot](https://t.me/uploadwithcaption_bot)
+
+> **Local-only**: This bot is intended to run on your local server.  
+> See **[LOCAL_SERVER_GUIDE.md](./LOCAL_SERVER_GUIDE.md)** for the recommended setup.
+
+> **Branch status:** This bot is production-ready and lives in `main`.
 
 ## Features
 
@@ -13,27 +20,24 @@ A Telegram bot that automatically adds the filename as caption when files are up
 - Works in both channels and groups
 - Simple setup - just add bot to channel/group as admin
 
-## Improvements Over Caption Bot
+## Key Features
 
-This bot includes several improvements:
-
-1. ✅ **Better file detection** - Fixed photo handling (photos don't have document attribute)
+1. ✅ **Reliable file detection** - Handles all file types including photos (photos don't have document attribute)
 2. ✅ **Retry logic** - Automatically retries failed caption edits
-3. ✅ **Better error handling** - More informative error messages
+3. ✅ **Comprehensive error handling** - Detailed and informative error messages
 4. ✅ **Groups support** - Works in both channels and groups
-5. ✅ **Status command** - `/status` command to check bot permissions
-6. ✅ **Delay handling** - Waits for message to be fully processed before editing
-7. ✅ **Better logging** - More detailed logs for debugging
+5. ✅ **Delay handling** - Waits for message to be fully processed before editing
+6. ✅ **Detailed logging** - Comprehensive logs for debugging and monitoring
 
 ## Setup
 
-### 1. Install Dependencies
+### 1. Install Dependencies (Shared)
 
 ```bash
-cd name-bot
-python3 -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-pip install -r requirements.txt
+# From repo root
+./scripts/setup_env.sh
+./scripts/install_deps.sh name-bot
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 ```
 
 ### 2. Configure Environment Variables
@@ -335,16 +339,6 @@ PROCESSING_DELAY=2.0  # 2 seconds between files (default: 1.0)
 - **Efficient**: No file downloads or re-uploads - just message editing
 - **Video notes and stickers**: These file types don't support captions in Telegram, so they're skipped
 
-## Differences from Caption Bot
-
-| Feature        | Caption Bot      | Name Bot             |
-| -------------- | ---------------- | -------------------- |
-| Photo handling | ❌ Buggy         | ✅ Fixed             |
-| Groups support | ❌ Channels only | ✅ Channels & Groups |
-| Retry logic    | ❌ No retries    | ✅ Automatic retries |
-| Status command | ❌ No            | ✅ Yes               |
-| Error messages | ⚠️ Basic         | ✅ Detailed          |
-| Delay handling | ❌ None          | ✅ 0.5s delay        |
 
 ## License
 

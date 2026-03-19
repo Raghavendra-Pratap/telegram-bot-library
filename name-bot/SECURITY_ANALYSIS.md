@@ -1,6 +1,6 @@
-# Security Analysis - Name Bot
+# Security Analysis - Upload with Caption Bot
 
-This document analyzes the security and privacy implications of using the Name Bot, especially for sensitive files.
+This document analyzes the security and privacy implications of using the Upload with Caption Bot, especially for sensitive files.
 
 ---
 
