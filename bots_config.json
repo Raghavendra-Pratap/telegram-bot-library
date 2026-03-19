@@ -1,0 +1,18 @@
+{
+  "bots": [
+    {
+      "id": "name_bot",
+      "name": "Name Bot",
+      "description": "Automatically sets filename as caption with HTTP server",
+      "directory": "name-bot",
+      "script": "bot.py",
+      "venv_path": "../.venv",
+      "port": 8080,
+      "enabled": true
+    }
+  ],
+  "dashboard": {
+    "port": 5000,
+    "host": "0.0.0.0"
+  }
+}
