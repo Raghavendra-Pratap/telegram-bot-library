@@ -1,15 +1,16 @@
 #!/bin/bash
-# Simple script to run the Index Bot
+# Run Index_bot in the foreground (same dependency flow as name-bot + launcher auto-install).
 
-cd "$(dirname "$0")"
+set -euo pipefail
+DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=ensure_env.sh
+source "${DIR}/ensure_env.sh"
+ensure_index_bot_dependencies
 
 echo "=========================================="
 echo "Index Bot - Starting..."
 echo "=========================================="
 echo ""
 
-# Activate virtual environment
-source venv/bin/activate
-
-# Run the bot (foreground so you can see output)
-python bot.py
+python check_readiness.py || exit 1
+exec python bot.py
