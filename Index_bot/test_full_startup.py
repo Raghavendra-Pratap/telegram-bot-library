@@ -18,12 +18,7 @@ async def test():
         # Test if we can access bot methods
         bot = application.bot
         print(f"✅ Bot instance: {type(bot).__name__}")
-        
-        # Check if get_chat_history exists (it might be async)
-        if hasattr(bot, 'get_chat_history'):
-            print("✅ get_chat_history method exists")
-        else:
-            print("⚠️  get_chat_history method not found (might need to update backfill function)")
+        print("ℹ️  Historical ingest uses forward_ingest.py (Telethon); Bot API has no chat history.")
         
         print("\n🎉 Bot startup test passed!")
         return True

@@ -57,13 +57,16 @@ Once the bot is running, send it a message:
 /add_channel @your_channel_username
 ```
 
-## 9. Backfill Existing Messages (Optional)
+## 9. Import old uploads (optional)
 
-To index existing files in a channel:
+Bots cannot read channel history. Use **Telethon** to forward old posts into an **ingest** channel (bot must be admin there):
+
+```bash
+source venv/bin/activate
+python forward_ingest.py @source_channel @ingest_channel
 ```
-/backfill @your_channel_username 500
-```
-This will index up to 500 recent messages from the channel.
+
+See `HOW_TO_RUN.md` → *Historical ingest*. In Telegram, `/backfill` shows a short summary for admins.
 
 ## Testing the Name Parser
 

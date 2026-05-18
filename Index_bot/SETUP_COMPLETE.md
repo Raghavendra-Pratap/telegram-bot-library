@@ -56,13 +56,9 @@ python bot.py
    /add_channel @your_channel_username
    ```
 
-### 6. Backfill Existing Messages (Optional)
+### 6. Import old uploads (optional)
 
-To index existing files in a channel:
-```
-/backfill @your_channel_username 500
-```
-
+Telegram bots cannot list old messages. To index existing media, use `forward_ingest.py` (needs `API_ID` / `API_HASH` in `.env`) to batch-forward from the source into an **ingest** channel where the bot is admin. See `HOW_TO_RUN.md`. Admins can run `/backfill` in the bot for a reminder.
 ## 🧪 Test the Name Parser
 
 You can test how the parser extracts names from file names:
@@ -83,7 +79,7 @@ python test_parser.py
 ### Admin Commands
 - `/add_channel <username>` - Add channel to monitor
 - `/remove_channel <username>` - Remove channel
-- `/backfill <username> [limit]` - Backfill existing messages
+- `/backfill` - Notes on importing historical uploads (`forward_ingest.py`)
 - `/pending` - View files needing confirmation
 - `/confirm <file_id> <name>` - Confirm file name
 

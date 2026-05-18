@@ -23,12 +23,17 @@
     {
       "id": "index_bot",
       "name": "Index Bot",
-      "description": "Search for movies and series across Telegram channels",
+      "description": "Indexes channel uploads, TMDB metadata, search/library, watch catalog",
       "directory": "Index_bot",
       "script": "bot.py",
       "venv_path": "../.venv",
       "port": null,
-      "enabled": true
+      "enabled": true,
+      "env_required": [
+        "BOT_TOKEN",
+        "ADMIN_USER_IDS"
+      ],
+      "pid_file": ".bot.pid"
     },
     {
       "id": "name_bot",

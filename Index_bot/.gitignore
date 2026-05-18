@@ -1,6 +1,10 @@
 # Environment variables
 .env
 
+# Telethon user session (forward_ingest.py)
+*.session
+*.session-journal
+
 # Database
 *.db
 *.sqlite

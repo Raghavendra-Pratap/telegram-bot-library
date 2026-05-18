@@ -11,7 +11,9 @@ def check_files():
         'config.py',
         'database.py',
         'name_parser.py',
-        'requirements.txt'
+        'requirements.txt',
+        'forward_ingest.py',
+        '.env.example',
     ]
     
     missing = []
@@ -49,6 +51,20 @@ def check_dependencies():
         print("❌ python-dotenv not installed")
         return False
     
+    try:
+        import telethon
+        print(f"✅ telethon (version: {telethon.__version__})")
+    except ImportError:
+        print("❌ telethon not installed")
+        return False
+
+    try:
+        import psycopg
+        print(f"✅ psycopg (version: {psycopg.__version__})")
+    except ImportError:
+        print("❌ psycopg not installed")
+        return False
+
     return True
 
 def check_modules():
@@ -78,7 +94,7 @@ def check_modules():
         # Test database initialization
         from config import Config
         from database import Database
-        db = Database(Config.DB_PATH)
+        db = Database()
         print("✅ database initialization")
     except Exception as e:
         print(f"❌ database initialization: {e}")
@@ -120,7 +136,7 @@ def check_syntax():
     """Check Python syntax"""
     import py_compile
     
-    files_to_check = ['bot.py', 'config.py', 'database.py', 'name_parser.py']
+    files_to_check = ['bot.py', 'config.py', 'database.py', 'name_parser.py', 'forward_ingest.py']
     for file in files_to_check:
         try:
             py_compile.compile(file, doraise=True)
