@@ -43,4 +43,5 @@ else
 fi
 
 echo ""
-echo "Start again: cd \"$DIR\" && source venv/bin/activate && python bot.py"
+echo "Start again: cd \"$DIR\" && ./run_bot.sh"
+echo "  (or from repo root: python bot_launcher.py → Index Bot)"

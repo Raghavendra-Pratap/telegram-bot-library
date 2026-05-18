@@ -1,12 +1,14 @@
 #!/bin/bash
-# Startup script for Index Bot
+# Startup script for Index Bot (shared .venv + auto-install, like name-bot via launcher).
 
-cd "$(dirname "$0")"
+set -euo pipefail
+DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=ensure_env.sh
+source "${DIR}/ensure_env.sh"
 
-# Check for running instances
 echo "Checking for running bot instances..."
-RUNNING=$(ps aux | grep -i "Index_bot.*bot.py" | grep -v grep)
-if [ ! -z "$RUNNING" ]; then
+RUNNING=$(ps aux | grep -i "Index_bot.*bot.py" | grep -v grep || true)
+if [[ -n "$RUNNING" ]]; then
     echo "⚠️  Bot is already running!"
     echo "$RUNNING"
     echo ""
@@ -14,7 +16,7 @@ if [ ! -z "$RUNNING" ]; then
     echo
     if [[ $REPLY =~ ^[Yy]$ ]]; then
         echo "Stopping existing instances..."
-        pkill -f "Index_bot.*bot.py"
+        "${DIR}/stop_bot.sh" 2>/dev/null || pkill -f "Index_bot.*bot.py" || true
         sleep 2
     else
         echo "Exiting. Bot is already running."
@@ -22,22 +24,14 @@ if [ ! -z "$RUNNING" ]; then
     fi
 fi
 
-# Activate virtual environment
-echo "Activating virtual environment..."
-source venv/bin/activate
+ensure_index_bot_dependencies
 
-# Check readiness
 echo "Running readiness check..."
-python check_readiness.py
-if [ $? -ne 0 ]; then
-    echo "❌ Readiness check failed. Please fix issues before starting."
-    exit 1
-fi
+python check_readiness.py || exit 1
 
 echo ""
 echo "Starting bot..."
 echo "Press Ctrl+C to stop"
 echo ""
 
-# Run the bot
-python bot.py
+exec python bot.py

@@ -17,7 +17,11 @@ A Telegram bot that indexes files from channels, extracts movie/series names, an
 
 ## Setup
 
-1. Install dependencies (shared):
+Same flow as **name-bot**: shared root `.venv`, `install_deps.sh`, optional launcher auto-install.
+
+See **[LOCAL_SERVER_GUIDE.md](./LOCAL_SERVER_GUIDE.md)** for the recommended setup.
+
+1. Install dependencies (from repo root):
 ```bash
 ./scripts/setup_env.sh
 ./scripts/install_deps.sh index
@@ -26,6 +30,7 @@ source .venv/bin/activate
 
 2. Create a `.env` file from the sample (or run `python create_env.py`):
 ```bash
+cd Index_bot
 cp .env.example .env
 # Edit .env — see .env.example for every variable and placeholder format
 ```
@@ -34,7 +39,10 @@ cp .env.example .env
 
 4. Run the bot:
 ```bash
+cd Index_bot
 python bot.py
+# or: ./run_bot.sh   (auto-installs missing deps like the launcher)
+# or from repo root: python bot_launcher.py → Index Bot
 ```
 
 ## Usage

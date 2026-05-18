@@ -162,57 +162,71 @@ Find Termux’s user and IP with `whoami` and `ifconfig` inside Termux after `pk
 
 ## 4. Python virtual environment and dependencies
 
-All following commands assume you are in the bot directory:
+**Recommended (same as name-bot):** clone the **full** `Telegram_Bot_Library` repo and use the **shared** `.venv` at the repo root. Helper scripts auto-install missing packages.
 
 ```bash
-cd ~/projects/Telegram_Bot_Library/Index_bot
-# or: cd ~/projects/Index_bot
+cd ~/projects/Telegram_Bot_Library
+./scripts/setup_env.sh
+./scripts/install_deps.sh index
 ```
 
-### 4.1 Create a virtual environment
+Then run Index_bot (deps are re-checked and installed if needed):
 
 ```bash
-python -m venv venv
+cd Index_bot
+chmod +x run_bot.sh start_bot.sh stop_bot.sh ensure_env.sh
+./run_bot.sh
 ```
 
-### 4.2 Activate it
+`run_bot.sh` / `start_bot.sh` call `ensure_env.sh`, which mirrors **bot_launcher.py**: create `.venv` if missing, run `install_deps.sh index` if imports fail.
 
-You must run this **every time** you open a new Termux session before using the bot:
+### 4.1 Manual path (full monorepo)
 
 ```bash
-source venv/bin/activate
+cd ~/projects/Telegram_Bot_Library
+source .venv/bin/activate
+cd Index_bot
+python check_readiness.py
+python bot.py
 ```
 
-Your prompt should show `(venv)`.
+### 4.2 Standalone `Index_bot` folder only (no parent `scripts/`)
 
-### 4.3 Upgrade pip
+If you copied **only** `Index_bot` (no monorepo), `ensure_env.sh` falls back to a **local** `Index_bot/venv` and `pip install -r requirements.txt`.
 
 ```bash
+cd ~/projects/Index_bot
+chmod +x run_bot.sh ensure_env.sh
+./run_bot.sh
+```
+
+Or install manually:
+
+```bash
+python -m venv venv && source venv/bin/activate
 pip install --upgrade pip wheel
-```
-
-### 4.4 Install Python dependencies
-
-**If you cloned the full monorepo** (`Telegram_Bot_Library`):
-
-```bash
-pip install -r ../requirements/bot-index.txt
-```
-
-**If you only have the `Index_bot` folder**, `requirements.txt` points to the parent repo. Install packages manually:
-
-```bash
 pip install "python-telegram-bot>=22.5" "python-dotenv>=1.0.0" \
   "sqlalchemy>=2.0.36" "tmdbv3api==1.2.0" "regex==2023.10.3" \
   "telethon>=1.36.0" "psycopg[binary]>=3.1.18"
 ```
 
-Installation can take several minutes on a phone. If a build fails, run `pkg install -y clang` and retry.
+If `pip install` fails to build a wheel, run `pkg install -y clang` and retry.
 
-### 4.5 Make shell scripts executable (optional)
+### 4.3 Launcher on Termux (optional)
+
+From repo root:
 
 ```bash
-chmod +x run_bot.sh start_bot.sh stop_bot.sh stop_all_bots.sh check_bot_processes.sh
+./scripts/setup_env.sh
+python bot_launcher.py
+```
+
+Start **Index Bot** from the menu — same auto dependency install as name-bot.
+
+### 4.4 Make shell scripts executable (optional)
+
+```bash
+chmod +x run_bot.sh start_bot.sh stop_bot.sh ensure_env.sh stop_all_bots.sh check_bot_processes.sh
 ```
 
 On Termux, `stop_bot.sh` may not find `lsof` unless you install it: `pkg install -y lsof`. If stop scripts fail, use the manual stop commands in [section 20](#20-stopping-and-restarting).
@@ -291,7 +305,7 @@ Leave empty to run without TMDB (parsing still works, with less validation).
 
 ## 9. Create and edit `.env`
 
-Still in `Index_bot` with `venv` activated:
+Still in `Index_bot` (with repo `.venv` or local `venv` activated):
 
 ### 9.1 Copy the template
 
@@ -363,8 +377,8 @@ Answer the prompts in the terminal. Use this only in an **interactive** Termux s
 
 ```bash
 cd ~/projects/Telegram_Bot_Library/Index_bot
-source venv/bin/activate
-python check_readiness.py
+./run_bot.sh   # installs deps if needed, then readiness + bot
+# or: source ../.venv/bin/activate && python check_readiness.py
 ```
 
 Fix anything marked **FAIL**:
@@ -383,8 +397,8 @@ First run in the **foreground** so you can see errors immediately.
 
 ```bash
 cd ~/projects/Telegram_Bot_Library/Index_bot
-source venv/bin/activate
-python bot.py
+./run_bot.sh
+# or: source ../.venv/bin/activate && python bot.py
 ```
 
 **Success looks like:**
