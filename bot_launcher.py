@@ -16,6 +16,12 @@ from typing import Any, Dict, List, Optional, Tuple
 from dataclasses import dataclass
 from collections import defaultdict
 
+# PyPI distribution name -> import module (when they differ)
+PACKAGE_IMPORT_ALIASES = {
+    "python-telegram-bot": "telegram",
+    "python-dotenv": "dotenv",
+}
+
 # Color codes for terminal output
 class Colors:
     GREEN = '\033[92m'
@@ -97,71 +103,97 @@ class BotLauncher:
             print(e.stderr)
             return False
     
-    def parse_requirements_file(self, requirements_path: Path) -> List[str]:
-        """Parse a requirements.txt file and return list of package names"""
-        packages = []
-        
-        if not requirements_path.exists():
+    def _normalize_requirement_name(self, line: str) -> Optional[str]:
+        """Extract PyPI package name from a requirements line."""
+        line = line.strip()
+        if not line or line.startswith("#"):
+            return None
+        if line.startswith(("-r", "--requirement")):
+            return None
+        if line.startswith(("-", "[")):
+            return None
+        # PEP 508: name before version specifiers / extras
+        token = line.split(";")[0].strip()
+        token = token.split("[")[0].strip()
+        for sep in ("==", ">=", "<=", "!=", "~=", ">", "<"):
+            if sep in token:
+                token = token.split(sep)[0].strip()
+        return token or None
+
+    def parse_requirements_file(
+        self,
+        requirements_path: Path,
+        visited: Optional[set] = None,
+    ) -> List[str]:
+        """Parse requirements.txt, following -r includes recursively."""
+        packages: List[str] = []
+        if visited is None:
+            visited = set()
+
+        req_path = requirements_path.resolve()
+        if req_path in visited:
             return packages
-        
+        visited.add(req_path)
+
+        if not req_path.exists():
+            return packages
+
         try:
-            with open(requirements_path, 'r') as f:
-                for line in f:
-                    line = line.strip()
-                    # Skip comments and empty lines
-                    if not line or line.startswith('#'):
+            base_dir = req_path.parent
+            with open(req_path, "r", encoding="utf-8") as f:
+                for raw_line in f:
+                    line = raw_line.strip()
+                    if not line or line.startswith("#"):
                         continue
-                    
-                    # Extract package name (before ==, >=, <=, etc.)
-                    package_name = line.split('>=')[0].split('==')[0].split('<=')[0].split('>')[0].split('<')[0].split('!=')[0].strip()
-                    if package_name:
-                        packages.append(package_name)
+                    if line.startswith(("-r", "--requirement")):
+                        parts = line.split(maxsplit=1)
+                        if len(parts) == 2:
+                            included = (base_dir / parts[1].strip()).resolve()
+                            packages.extend(
+                                self.parse_requirements_file(included, visited)
+                            )
+                        continue
+                    name = self._normalize_requirement_name(line)
+                    if name:
+                        packages.append(name)
         except Exception as e:
-            print(f"{Colors.YELLOW}⚠️  Error parsing {requirements_path}: {e}{Colors.RESET}")
-        
+            print(
+                f"{Colors.YELLOW}⚠️  Error parsing {requirements_path}: {e}{Colors.RESET}"
+            )
+
         return packages
     
+    def _pip_list_names(self, python_exe: Path) -> set:
+        result = subprocess.run(
+            [str(python_exe), "-m", "pip", "list", "--format=json"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode != 0:
+            return set()
+        installed = json.loads(result.stdout)
+        return {pkg["name"].lower() for pkg in installed}
+
     def check_package_installed(self, package_name: str, venv_python: Optional[Path] = None) -> bool:
         """Check if a package is installed in a specific virtual environment"""
         try:
-            if venv_python:
-                # Check in specific venv using pip list
-                result = subprocess.run(
-                    [str(venv_python), "-m", "pip", "list", "--format=json"],
-                    capture_output=True,
-                    text=True,
-                    timeout=10
-                )
-                if result.returncode == 0:
-                    installed_packages = json.loads(result.stdout)
-                    # Check if package is installed (case-insensitive)
-                    package_lower = package_name.lower()
-                    for pkg in installed_packages:
-                        if pkg['name'].lower() == package_lower:
-                            return True
+            pip_name = package_name.lower()
+            python_exe = venv_python or Path(sys.executable)
+
+            installed = self._pip_list_names(python_exe)
+            if pip_name in installed:
+                return True
+
+            import_name = PACKAGE_IMPORT_ALIASES.get(
+                package_name.lower(),
+                package_name.replace("-", "_").lower(),
+            )
+            try:
+                __import__(import_name)
+                return True
+            except ImportError:
                 return False
-            else:
-                # Check in current environment
-                try:
-                    # Try importing common package name variations
-                    import_name = package_name.replace('-', '_').lower()
-                    __import__(import_name)
-                    return True
-                except ImportError:
-                    # Try pip list in current environment
-                    result = subprocess.run(
-                        [sys.executable, "-m", "pip", "list", "--format=json"],
-                        capture_output=True,
-                        text=True,
-                        timeout=10
-                    )
-                    if result.returncode == 0:
-                        installed_packages = json.loads(result.stdout)
-                        package_lower = package_name.lower()
-                        for pkg in installed_packages:
-                            if pkg['name'].lower() == package_lower:
-                                return True
-                    return False
         except (subprocess.TimeoutExpired, json.JSONDecodeError, Exception):
             return False
     
@@ -288,6 +320,52 @@ class BotLauncher:
             python_exe = venv_path / "bin" / "python3"
         return python_exe if python_exe.exists() else None
     
+    def check_bot_env(self, bot: dict) -> Tuple[bool, str]:
+        """Verify .env exists and required variables are set (non-secret check)."""
+        required = bot.get("env_required") or []
+        if not required:
+            return True, "OK"
+
+        bot_dir = self.base_dir / bot["directory"]
+        env_path = bot_dir / ".env"
+        if not env_path.exists():
+            example = bot_dir / ".env.example"
+            hint = f" (copy {example.name} to .env)" if example.exists() else ""
+            return False, f".env not found in {bot_dir}{hint}"
+
+        values: Dict[str, Optional[str]] = {}
+        try:
+            with open(env_path, "r", encoding="utf-8") as f:
+                for raw in f:
+                    line = raw.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    key, _, val = line.partition("=")
+                    values[key.strip()] = val.strip().strip('"').strip("'")
+        except OSError as e:
+            return False, f"Could not read .env: {e}"
+
+        missing = [k for k in required if not (values.get(k) or "").strip()]
+        if missing:
+            return False, f"Missing or empty in .env: {', '.join(missing)}"
+        return True, "OK"
+
+    def _clear_stale_pid_file(self, bot_dir: Path, pid_file: str) -> Optional[str]:
+        """Remove pid file if the process is gone. Return error message if still running."""
+        path = bot_dir / pid_file
+        if not path.exists():
+            return None
+        try:
+            pid = int(path.read_text(encoding="utf-8").strip())
+            os.kill(pid, 0)
+            return (
+                f"Another instance is already running (PID {pid}). "
+                f"Stop it first or remove stale {path.name} if incorrect."
+            )
+        except (OSError, ValueError):
+            path.unlink(missing_ok=True)
+            return None
+
     def check_bot_setup(self, bot: dict) -> Tuple[bool, str]:
         """Check if bot is properly set up"""
         bot_dir = self.base_dir / bot['directory']
@@ -305,6 +383,16 @@ class BotLauncher:
         
         if self._get_bot_venv_python(bot) is None:
             return False, f"Python executable not found in venv: {venv_path}"
+
+        env_ok, env_msg = self.check_bot_env(bot)
+        if not env_ok:
+            return False, env_msg
+
+        pid_file = bot.get("pid_file")
+        if pid_file:
+            pid_err = self._clear_stale_pid_file(bot_dir, pid_file)
+            if pid_err:
+                return False, pid_err
         
         return True, "OK"
     
@@ -345,6 +433,13 @@ class BotLauncher:
             return None
         
         script_path = bot_dir / bot['script']
+
+        pid_file = bot.get("pid_file")
+        if pid_file:
+            pid_err = self._clear_stale_pid_file(bot_dir, pid_file)
+            if pid_err:
+                print(f"{Colors.RED}❌ {bot_name}: {pid_err}{Colors.RESET}")
+                return None
         
         print(f"{Colors.CYAN}🚀 Starting {bot_name}...{Colors.RESET}")
         

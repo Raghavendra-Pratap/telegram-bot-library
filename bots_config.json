@@ -9,6 +9,21 @@
       "venv_path": "../.venv",
       "port": 8080,
       "enabled": true
+    },
+    {
+      "id": "index_bot",
+      "name": "Index Bot",
+      "description": "Indexes channel uploads, TMDB metadata, search/library, watch catalog",
+      "directory": "Index_bot",
+      "script": "bot.py",
+      "venv_path": "../.venv",
+      "port": null,
+      "enabled": true,
+      "env_required": [
+        "BOT_TOKEN",
+        "ADMIN_USER_IDS"
+      ],
+      "pid_file": ".bot.pid"
     }
   ],
   "dashboard": {
