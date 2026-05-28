@@ -3,7 +3,7 @@ Base downloader class for all platforms
 """
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Callable
 import logging
 import time
 
@@ -138,4 +138,58 @@ class BaseDownloader(ABC):
     def get_output_path(self, filename: str) -> Path:
         """Generate output file path"""
         return self.download_dir / filename
+
+    def make_ydl_hooks(
+        self, progress_callback: Optional[Callable[[str, str, str], None]] = None
+    ) -> tuple[list, list, "Callable[[], Optional[Path]]"]:
+        """
+        Build yt-dlp progress_hooks and postprocessor_hooks that reliably
+        capture the final output path (after FFmpeg post-processing).
+
+        Args:
+            progress_callback: optional fn(percent_str, speed_str, eta_str)
+                               called on each download progress tick (throttled).
+
+        Returns:
+            (progress_hooks, postprocessor_hooks, get_final_path)
+              - progress_hooks       → pass as ydl_opts['progress_hooks']
+              - postprocessor_hooks  → pass as ydl_opts['postprocessor_hooks']
+              - get_final_path()     → call after download to get final Path or None
+        """
+        final_path: list[Optional[str]] = [None]
+        _last_cb_time: list[float] = [0.0]
+
+        def _progress_hook(d: dict) -> None:
+            status = d.get("status")
+            if status == "finished" and not final_path[0]:
+                # Pre-postprocessor filename — keep as fallback
+                final_path[0] = d.get("filename")
+            elif status == "downloading" and progress_callback:
+                now = time.time()
+                if now - _last_cb_time[0] >= 1.5:  # throttle: keep parallel jobs feeling responsive
+                    _last_cb_time[0] = now
+                    progress_callback(
+                        (d.get("_percent_str") or "?").strip(),
+                        (d.get("_speed_str")   or "?").strip(),
+                        (d.get("_eta_str")     or "?").strip(),
+                    )
+
+        def _postprocessor_hook(d: dict) -> None:
+            # Fires after each postprocessor (e.g. FFmpegVideoConvertor).
+            # info_dict['filepath'] holds the converted file path.
+            if d.get("status") == "finished":
+                info = d.get("info_dict", {})
+                fp = info.get("filepath") or info.get("filename")
+                if fp:
+                    final_path[0] = fp
+                    logger.debug(f"Postprocessor final path: {fp}")
+
+        def get_final_path() -> Optional[Path]:
+            if final_path[0]:
+                p = Path(final_path[0])
+                if p.exists():
+                    return p
+            return None
+
+        return [_progress_hook], [_postprocessor_hook], get_final_path
 

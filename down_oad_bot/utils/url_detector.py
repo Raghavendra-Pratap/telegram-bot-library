@@ -41,7 +41,12 @@ class URLDetector:
             r'(?:https?://)?(?:www\.)?reddit\.com/r/\w+/comments/[a-zA-Z0-9_]+',
             r'(?:https?://)?(?:www\.)?redd\.it/([a-zA-Z0-9_]+)',
         ],
-        # TIKTOK: disabled (not supported in our region; plan support later)
+        Platform.TIKTOK: [
+            r'(?:https?://)?(?:www\.|vm\.|m\.)?tiktok\.com/@[\w.]+/video/(\d+)',
+            r'(?:https?://)?(?:www\.|vm\.|m\.)?tiktok\.com/t/([a-zA-Z0-9]+)',
+            r'(?:https?://)?(?:www\.|vm\.)?tiktok\.com/v/(\d+)',
+            r'(?:https?://)?vt\.tiktok\.com/([a-zA-Z0-9]+)',
+        ],
         Platform.THREADS: [
             r'(?:https?://)?(?:www\.)?threads\.(?:net|com)/@[\w.]+/post/([a-zA-Z0-9_-]+)',
             r'(?:https?://)?(?:www\.)?threads\.(?:net|com)/t/([a-zA-Z0-9_-]+)',
@@ -64,6 +69,21 @@ class URLDetector:
                 return True
         return False
     
+    @staticmethod
+    def extract_all_supported_urls(text: str) -> list[str]:
+        """Return all distinct supported URLs found in *text*, in order."""
+        seen: set[str] = set()
+        results: list[str] = []
+        for raw in re.findall(r'https?://[^\s]+', text):
+            url = raw.rstrip(')')  # strip trailing ) from markdown-style links
+            if url in seen:
+                continue
+            platform, _ = URLDetector.detect_platform(url)
+            if platform != Platform.UNKNOWN:
+                seen.add(url)
+                results.append(url)
+        return results
+
     @staticmethod
     def detect_platform(url: str) -> Tuple[Platform, Optional[str]]:
         """

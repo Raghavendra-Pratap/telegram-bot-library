@@ -7,6 +7,7 @@ from .twitter_downloader import TwitterDownloader
 from .instagram_downloader import InstagramDownloader
 from .threads_downloader import ThreadsDownloader
 from .gif_downloader import GIFDownloader
+from .tiktok_downloader import TikTokDownloader
 from .base_downloader import BaseDownloader
 
 __all__ = [
@@ -16,6 +17,7 @@ __all__ = [
     'InstagramDownloader',
     'ThreadsDownloader',
     'GIFDownloader',
+    'TikTokDownloader',
     'BaseDownloader',
 ]
 
