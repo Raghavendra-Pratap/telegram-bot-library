@@ -94,7 +94,7 @@ class Channel(Base):
     telethon_last_seen_message_id = Column(Integer, nullable=True)
     telethon_last_polled_at = Column(DateTime, nullable=True)
     telethon_last_poll_indexed = Column(Integer, default=0)
-
+    
     # Relationships
     uploads = relationship(
         "FileUpload",
@@ -157,7 +157,7 @@ class FileUpload(Base):
     pipeline_route_status = Column(String, nullable=True)  # pending | routed | failed | skipped
     pipeline_route_target_channel_id = Column(String, nullable=True)
     pipeline_route_error = Column(String, nullable=True)
-
+    
     # Relationships
     content_title = relationship("MovieSeries", foreign_keys=[content_title_id])
     channel = relationship(
@@ -885,16 +885,21 @@ class Database:
                 fcols = {c["name"] for c in insp.get_columns("file_uploads")}
                 if "library_visible" in fcols:
                     with self.engine.begin() as conn:
+                        confirmed_cond = (
+                            "is_confirmed = 1"
+                            if self.engine.dialect.name == "sqlite"
+                            else "is_confirmed IS TRUE"
+                        )
                         conn.execute(
                             text(
                                 """
                                 UPDATE file_uploads
                                 SET library_visible = 1
-                                WHERE is_confirmed = 1
+                                WHERE {confirmed_cond}
                                   AND content_title_id IN (
                                     SELECT id FROM movie_series WHERE tmdb_id IS NOT NULL
                                   )
-                                """
+                                """.format(confirmed_cond=confirmed_cond)
                             )
                         )
         except Exception as e:
@@ -1310,7 +1315,7 @@ class Database:
             return [self._channel_for_return(session, ch) for ch in rows]
         finally:
             session.close()
-
+    
     def get_channels_bot_can_post(self, active_only=True):
         """Channels where Index Bot can publish (distribution / upload targets)."""
         session = self.get_session()
@@ -3739,7 +3744,7 @@ class Database:
             )
         finally:
             session.close()
-
+    
     def confirm_file_name(self, file_id, confirmed_name):
         """Confirm the name for a file"""
         session = self.get_session()
@@ -3916,7 +3921,7 @@ class Database:
             return 0
         finally:
             session.close()
-
+    
     def get_pending_confirmations(self, limit=50):
         """Get files that need admin confirmation"""
         session = self.get_session()
@@ -3935,7 +3940,7 @@ class Database:
             return q.all()
         finally:
             session.close()
-
+    
     def list_pending_confirmations_page(
         self, *, offset: int = 0, limit: int = 20
     ) -> tuple[list[dict], int]:
