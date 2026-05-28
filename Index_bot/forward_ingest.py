@@ -33,6 +33,7 @@ from telethon.tl.types import MessageService, PeerChannel
 load_dotenv(_ROOT / ".env")
 
 from media_utils import is_indexable_filename
+from fingerprint import compute_content_fingerprint
 
 # While a backfill job runs, index posts using this source if Telegram omits forward metadata
 _active_backfill_source_id: str | None = None
@@ -117,30 +118,64 @@ async def resolve_entity(
     )
 
 
+def extract_telethon_message_file(message) -> dict | None:
+    """File metadata from a Telethon message (documents, video, audio, photos)."""
+    if isinstance(message, MessageService) or getattr(message, "action", None):
+        return None
+    if not getattr(message, "media", None):
+        return None
+
+    file_name = None
+    file_size = None
+    file_unique_id = None
+
+    f = getattr(message, "file", None)
+    if f is not None:
+        file_name = getattr(f, "name", None)
+        file_size = getattr(f, "size", None)
+        fid = getattr(f, "id", None)
+        if fid is not None:
+            file_unique_id = str(fid)
+
+    if not file_name:
+        media = message.media
+        doc = getattr(media, "document", None)
+        if doc:
+            for attr in getattr(doc, "attributes", None) or []:
+                name = getattr(attr, "file_name", None)
+                if name:
+                    file_name = name
+                    break
+            file_size = file_size or getattr(doc, "size", None)
+            if getattr(doc, "id", None) is not None:
+                file_unique_id = file_unique_id or str(doc.id)
+
+    if not file_name and getattr(message, "video", None):
+        file_name = getattr(message.video, "file_name", None) or f"video_{message.id}.mp4"
+        file_size = file_size or getattr(message.video, "size", None)
+    if not file_name and getattr(message, "photo", None):
+        file_name = f"photo_{message.id}.jpg"
+        file_size = file_size or getattr(message.photo, "size", None)
+
+    if not file_name:
+        return None
+    if not is_indexable_filename(file_name):
+        return None
+    return {
+        "file_name": file_name,
+        "file_size": file_size,
+        "file_unique_id": file_unique_id,
+    }
+
+
 def _message_filename(message) -> str | None:
-    media = getattr(message, "media", None)
-    if not media:
-        return None
-    doc = getattr(media, "document", None)
-    if not doc:
-        return None
-    for attr in getattr(doc, "attributes", None) or []:
-        name = getattr(attr, "file_name", None)
-        if name:
-            return name
-    return None
+    info = extract_telethon_message_file(message)
+    return info["file_name"] if info else None
 
 
 def should_forward_message(message) -> bool:
     """Forward indexable media (skip subtitles and service messages)."""
-    if isinstance(message, MessageService) or getattr(message, "action", None):
-        return False
-    if not getattr(message, "media", None):
-        return False
-    file_name = _message_filename(message)
-    if file_name and not is_indexable_filename(file_name):
-        return False
-    return True
+    return extract_telethon_message_file(message) is not None
 
 
 async def run_forward(
@@ -159,11 +194,12 @@ async def run_forward(
     dest_peer_id: str | int | None = None,
     source_label: str | None = None,
     dest_label: str | None = None,
-) -> tuple[int, int, int]:
+    skip_duplicates: bool = False,
+) -> tuple[int, int, int, int]:
     """
     Forward indexable media from source to dest.
 
-    Returns (scanned, indexable_forwarded, skipped_non_document).
+    Returns (scanned, indexable_forwarded, skipped_non_media, duplicates_skipped).
     """
     client = TelegramClient(str(session_path), api_id, api_hash)
     await client.connect()
@@ -183,6 +219,8 @@ async def run_forward(
     forwarded = 0
     scanned = 0
     skipped_non_media = 0
+    duplicates_skipped = 0
+    catalog_db = Database() if skip_duplicates or dry_run else None
 
     if source_peer_id is not None:
         _active_backfill_source_id = str(source_peer_id)
@@ -201,7 +239,7 @@ async def run_forward(
         )
 
         if progress_callback:
-            await progress_callback(0, 0, 0)
+            await progress_callback(0, 0, 0, 0)
 
         batch_ids: list[int] = []
 
@@ -237,11 +275,31 @@ async def run_forward(
         ):
             scanned += 1
             if progress_callback and (scanned == 1 or scanned % 5 == 0):
-                await progress_callback(scanned, forwarded, skipped_non_media)
+                await progress_callback(scanned, forwarded, skipped_non_media, duplicates_skipped)
 
-            if not should_forward_message(message):
+            info = extract_telethon_message_file(message)
+            if not info:
                 skipped_non_media += 1
                 continue
+
+            if catalog_db:
+                fp = compute_content_fingerprint(
+                    info["file_name"],
+                    info.get("file_size"),
+                    file_unique_id=info.get("file_unique_id"),
+                )
+                incoming = (
+                    str(dest_peer_id)
+                    if dest_peer_id
+                    else catalog_db.get_ingest_channel_id()
+                )
+                if catalog_db.find_uploads_by_fingerprint(
+                    fp, limit=1, incoming_channel_id=incoming
+                ):
+                    duplicates_skipped += 1
+                    if skip_duplicates and not dry_run:
+                        continue
+
             if dry_run:
                 forwarded += 1
                 continue
@@ -255,13 +313,14 @@ async def run_forward(
         await client.disconnect()
 
     if progress_callback:
-        await progress_callback(scanned, forwarded, skipped_non_media)
+        await progress_callback(scanned, forwarded, skipped_non_media, duplicates_skipped)
 
     print(
         f"Done. Scanned={scanned} media_forwarded={forwarded} "
-        f"skipped_no_media={skipped_non_media} dry_run={dry_run}"
+        f"skipped_no_media={skipped_non_media} duplicates={duplicates_skipped} "
+        f"dry_run={dry_run} skip_duplicates={skip_duplicates}"
     )
-    return scanned, forwarded, skipped_non_media
+    return scanned, forwarded, skipped_non_media, duplicates_skipped
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -305,6 +364,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--dry-run",
         action="store_true",
         help="Iterate and count indexable media only; do not forward",
+    )
+    p.add_argument(
+        "--skip-duplicates",
+        action="store_true",
+        help="Do not forward messages that match an existing library fingerprint",
     )
     return p.parse_args(argv)
 
@@ -363,6 +427,7 @@ def main(argv: list[str] | None = None) -> int:
                 batch_size=max(1, args.batch_size),
                 delay_s=max(0.0, args.delay),
                 dry_run=args.dry_run,
+                skip_duplicates=args.skip_duplicates,
             )
         )
         return 0

@@ -1,0 +1,8 @@
+# Combined dependencies for Index_bot runtime:
+# - Bot
+# - Portal (FastAPI/Uvicorn)
+# - Telethon flows (ingest/upload/watch/route/stream)
+# - PostgreSQL driver
+#
+# Uses monorepo requirements when available.
+-r ../requirements/bot-index.txt

@@ -1,9 +1,41 @@
 """
 Test script for the name parser
 """
-from name_parser import NameParser
+from name_parser import NameParser, strip_clipmate_movie_prefix
 
 parser = NameParser()
+
+CLIPMATE_FILES = [
+    (
+        "@Clipmate_Movie_Check_2021_1080p_HEVC_HDRip_UNCUT_South_Movie_Dual.mkv",
+        "Check",
+        "2021",
+    ),
+    (
+        "@Clipmate_Movie_Pushpa:_The_Rise_Part_1_2021_720p_HDRip_UNCUT_South.mkv",
+        "Pushpa: The Rise Part 1",
+        "2021",
+    ),
+    (
+        "Aclipmate Movie Check 2021 720p.mkv",
+        "Check",
+        "2021",
+    ),
+]
+
+
+def test_clipmate_prefix_strip() -> None:
+    raw = "@Clipmate_Movie_Check_2021.mkv"
+    assert strip_clipmate_movie_prefix(raw).lower().startswith("check")
+    for filename, expected_title, expected_year in CLIPMATE_FILES:
+        result = parser.parse_name(filename)
+        assert expected_title.lower() in (result["name"] or "").lower(), (
+            f"{filename!r} -> {result['name']!r}, want {expected_title!r}"
+        )
+        assert result.get("year") == expected_year, (
+            f"{filename!r} year {result.get('year')!r}, want {expected_year!r}"
+        )
+
 
 test_files = [
     "CIA.Americas.Secret.Warriors.1of3.x264.AC3.MVGroup.org.mkv",
@@ -34,18 +66,22 @@ test_files = [
     "Twelve Monkeys 1995 Remastered 1080p BluRay HEVC x265 5.1 BONE.mkv"
 ]
 
-print("=" * 80)
-print("Name Parser Test Results")
-print("=" * 80)
+if __name__ == "__main__":
+    test_clipmate_prefix_strip()
+    print("clipmate prefix tests OK\n")
 
-for filename in test_files:
-    result = parser.parse_name(filename)
-    display_name = parser.format_display_name(result)
-    
-    print(f"\nOriginal: {filename}")
-    print(f"Parsed:   {result['name']}")
-    print(f"Year:     {result['year']}")
-    print(f"Part:     {result['part_info']}")
-    print(f"Display:  {display_name}")
-    print(f"Confidence: {result['confidence']}")
-    print("-" * 80)
+    print("=" * 80)
+    print("Name Parser Test Results")
+    print("=" * 80)
+
+    for filename in test_files:
+        result = parser.parse_name(filename)
+        display_name = parser.format_display_name(result)
+
+        print(f"\nOriginal: {filename}")
+        print(f"Parsed:   {result['name']}")
+        print(f"Year:     {result['year']}")
+        print(f"Part:     {result['part_info']}")
+        print(f"Display:  {display_name}")
+        print(f"Confidence: {result['confidence']}")
+        print("-" * 80)

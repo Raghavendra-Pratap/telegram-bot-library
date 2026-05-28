@@ -7,7 +7,7 @@ import logging
 from typing import Any
 
 from series_grouping import show_group_key
-from tmdb_helper import split_title_year, titles_match
+from tmdb_helper import sort_suggestions_poster_first, split_title_year, titles_match
 
 logger = logging.getLogger(__name__)
 
@@ -60,14 +60,15 @@ def gather_tmdb_suggestions(meta: dict, *, tmdb_helper, db) -> list[dict]:
         year_int = embedded_year
     search_name = clean_search or search_name
 
-    if media_type == "tv":
-        suggestions = tmdb_helper.search_suggestions_multi(
-            search_name, media_type="tv", year=year_int, limit=6
-        )
-    else:
-        suggestions = tmdb_helper.search_suggestions_multi(
-            search_name, media_type="movie", year=year_int, limit=6
-        )
+    from config import Config
+
+    pick_limit = Config.TMDB_PICK_SUGGESTION_LIMIT
+    suggestions = tmdb_helper.search_suggestions_for_pick(
+        search_name,
+        media_type=media_type,
+        year=year_int,
+        limit=pick_limit,
+    )
 
     match_key = meta.get("show_group_key")
     if match_key:
@@ -97,7 +98,7 @@ def gather_tmdb_suggestions(meta: dict, *, tmdb_helper, db) -> list[dict]:
                     "year": str(existing.release_year) if existing.release_year else None,
                 }
             ]
-    return suggestions
+    return sort_suggestions_poster_first(suggestions)
 
 
 def episode_display_name(

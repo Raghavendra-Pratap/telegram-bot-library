@@ -93,7 +93,23 @@ def is_poster_sidecar_upload(upload) -> bool:
 
 
 def filter_watchable_media_uploads(uploads: list) -> list:
-    return [u for u in uploads if not is_poster_sidecar_upload(u)]
+    return filter_deliverable_uploads(uploads)
+
+
+def filter_deliverable_uploads(uploads: list) -> list:
+    """Video/audio plus documents/images (PDFs, ebooks) — not poster sidecars."""
+    out = []
+    for u in uploads:
+        if is_poster_sidecar_upload(u):
+            continue
+        kind = (getattr(u, "file_kind", None) or "video").lower()
+        if kind in ("video", "audio", "document", "image"):
+            out.append(u)
+            continue
+        name = (getattr(u, "file_name", None) or "").lower()
+        if any(name.endswith(ext) for ext in (".pdf", ".epub", ".mobi", ".cbz", ".cbr", ".zip")):
+            out.append(u)
+    return out
 
 
 def sort_variants(uploads: list) -> list:
@@ -143,9 +159,37 @@ def upload_copy_ref(upload) -> tuple[int | str, int]:
         return cid, int(mid)
 
 
+def upload_stream_channel_ids(upload) -> list[str]:
+    """Channel ids to try for Telethon download (source first when forwarded)."""
+    out: list[str] = []
+    for cid in (getattr(upload, "source_channel_id", None), upload.channel_id):
+        if not cid:
+            continue
+        s = str(cid)
+        if s not in out:
+            out.append(s)
+    return out
+
+
 def upload_copy_candidates(upload) -> list[tuple[int | str, int]]:
     """Ordered sources to copy the actual file from."""
-    return [upload_copy_ref(upload)]
+    mid = int(upload.message_id)
+    out: list[tuple[int | str, int]] = []
+    seen: set[tuple[str, int]] = set()
+    for cid in upload_stream_channel_ids(upload):
+        try:
+            key = (str(int(cid)), mid)
+            chat: int | str = int(cid)
+        except (TypeError, ValueError):
+            key = (str(cid), mid)
+            chat = cid
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append((chat, mid))
+    if not out:
+        out.append(upload_copy_ref(upload))
+    return out
 
 
 def copy_delivery_error_hint(exc: BaseException) -> str:

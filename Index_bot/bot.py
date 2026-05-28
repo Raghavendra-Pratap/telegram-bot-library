@@ -10,6 +10,7 @@ import time
 from datetime import datetime
 from html import escape
 from pathlib import Path
+from types import SimpleNamespace
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, MessageOriginChannel
 from telegram.ext import (
     Application,
@@ -78,7 +79,12 @@ from tracking_stats import (
 )
 from watch_channel import maybe_auto_publish_watch
 import watch_features
+import upload_features
+import vault_features
+import archive_browse
+import library_setup
 import bot_busy
+from upload_pipeline import extract_message_file, index_channel_upload
 from job_queue import enqueue_background, enqueue_ingest, enqueue_interactive, start_job_queue
 from telegram_flood import (
     batch_pause,
@@ -90,6 +96,7 @@ from telegram_flood import (
     flood_reply_photo,
     flood_reply_text,
     flood_send_message,
+    flood_send_photo,
     is_unchanged_message_error,
     present_callback_ui,
     present_watch_picker_ui,
@@ -173,6 +180,60 @@ async def safe_edit_message(query, text: str, reply_markup=None, *, parse_mode=P
         return False
 
 
+def _ui_anchor_bot(query, context: ContextTypes.DEFAULT_TYPE):
+    if hasattr(query, "get_bot"):
+        return query.get_bot()
+    return context.bot
+
+
+async def _send_tmdb_suggestion_card(
+    query,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    photo: str | None,
+    text: str,
+    reply_markup: InlineKeyboardMarkup,
+) -> object | None:
+    """Post one suggestion card (reply or send with reply_to for HeaderEditAnchor)."""
+    msg = query.message
+    if hasattr(msg, "reply_photo") and photo:
+        return await flood_reply_photo(
+            msg,
+            photo=photo,
+            caption=text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=reply_markup,
+        )
+    if hasattr(msg, "reply_text") and not photo:
+        return await flood_reply_text(
+            msg,
+            text=text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=reply_markup,
+        )
+    bot = _ui_anchor_bot(query, context)
+    reply_to = msg.message_id
+    chat_id = msg.chat_id
+    if photo:
+        return await flood_send_photo(
+            bot,
+            chat_id,
+            photo=photo,
+            caption=text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=reply_markup,
+            reply_to_message_id=reply_to,
+        )
+    return await flood_send_message(
+        bot,
+        chat_id,
+        text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=reply_markup,
+        reply_to_message_id=reply_to,
+    )
+
+
 async def _send_tmdb_suggestion_cards(
     query,
     context: ContextTypes.DEFAULT_TYPE,
@@ -181,17 +242,24 @@ async def _send_tmdb_suggestion_cards(
     *,
     file_id: int | None = None,
     match_key: str | None = None,
+    start_index: int = 0,
+    clear_existing: bool = True,
 ) -> None:
     """One Telegram message per TMDB match (poster + plot + Select button)."""
     chat_id = query.message.chat_id
-    await _clear_tmdb_suggestion_cards(
-        context, chat_id, file_id=file_id, match_key=match_key
-    )
-    _remember_tmdb_pick_header(query, context, file_id=file_id, match_key=match_key)
+    if clear_existing:
+        await _clear_tmdb_suggestion_cards(
+            context, chat_id, file_id=file_id, match_key=match_key
+        )
+        _remember_tmdb_pick_header(query, context, file_id=file_id, match_key=match_key)
 
-    msg_ids: list[int] = []
-    for i, s in enumerate(suggestions[:5]):
-        cap = format_suggestion_card_caption(s, i + 1)
+    msg_ids: list[int] = list(
+        context.user_data.get(_tmdb_card_msgs_key(file_id=file_id, match_key=match_key))
+        or []
+    )
+    for i, s in enumerate(suggestions):
+        global_i = start_index + i
+        cap = format_suggestion_card_caption(s, global_i + 1)
         if len(cap) > 1024:
             cap = cap[:1020] + "…"
         markup = InlineKeyboardMarkup(
@@ -199,7 +267,7 @@ async def _send_tmdb_suggestion_cards(
                 [
                     InlineKeyboardButton(
                         "✅ Select this title",
-                        callback_data=pick_callback(i),
+                        callback_data=pick_callback(global_i),
                     )
                 ]
             ]
@@ -207,28 +275,21 @@ async def _send_tmdb_suggestion_cards(
         img_url = poster_image_url(s)
         sent = None
         try:
-            if img_url:
-                sent = await flood_reply_photo(
-                    query.message,
-                    photo=img_url,
-                    caption=cap,
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=markup,
-                )
-            else:
-                sent = await flood_reply_text(
-                    query.message,
-                    text=cap,
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=markup,
-                )
+            sent = await _send_tmdb_suggestion_card(
+                query,
+                context,
+                photo=img_url or None,
+                text=cap,
+                reply_markup=markup,
+            )
         except BadRequest as e:
             logger.warning("Suggestion card %s photo failed: %s", i + 1, e)
             try:
-                sent = await flood_reply_text(
-                    query.message,
+                sent = await _send_tmdb_suggestion_card(
+                    query,
+                    context,
+                    photo=None,
                     text=cap,
-                    parse_mode=ParseMode.HTML,
                     reply_markup=markup,
                 )
             except Exception as e2:
@@ -242,7 +303,7 @@ async def _send_tmdb_suggestion_cards(
 
 
 class MessageUiAnchor:
-    """Reply-as-new-message anchor for flows started from user text (not callbacks)."""
+    """Edit the bot message used as the UI surface (e.g. TMDB search status)."""
 
     _message_anchor = True
 
@@ -252,6 +313,40 @@ class MessageUiAnchor:
 
     def get_bot(self):
         return self.message.get_bot()
+
+
+class HeaderEditAnchor:
+    """Edit an existing bot message (pending map auto-advance)."""
+
+    _header_edit_anchor = True
+
+    def __init__(self, bot, chat_id: int, message_id: int, from_user=None):
+        self.from_user = from_user
+        self.message = SimpleNamespace(
+            chat_id=chat_id,
+            message_id=message_id,
+            chat=SimpleNamespace(id=chat_id),
+            from_user=from_user,
+        )
+        self._bot = bot
+
+    def get_bot(self):
+        return self._bot
+
+    async def edit_message_text(
+        self,
+        text: str,
+        reply_markup=None,
+        parse_mode=ParseMode.HTML,
+    ) -> None:
+        await flood_bot_edit_message_text(
+            self._bot,
+            self.message.chat_id,
+            self.message.message_id,
+            text,
+            reply_markup=reply_markup,
+            parse_mode=parse_mode,
+        )
 
 
 def _parsed_release_year(parsed: dict | None) -> int | None:
@@ -264,23 +359,71 @@ def _parsed_release_year(parsed: dict | None) -> int | None:
         return None
 
 
-async def _manual_tmdb_search(
+async def _fetch_tmdb_pick_page(
     query_text: str,
     *,
     media_type: str,
     parsed: dict | None,
-) -> list[dict]:
+    page: int = 1,
+    filter_type: str = "all",
+) -> dict:
     year_int = _parsed_release_year(parsed)
     _, emb = split_title_year(query_text)
     if emb is not None:
         year_int = emb
     return await asyncio.to_thread(
-        tmdb_helper.search_suggestions_for_pick,
+        tmdb_helper.search_pick_page,
         query_text,
+        page=page,
+        filter_type=filter_type,
         media_type=media_type,
         year=year_int,
-        limit=6,
     )
+
+
+async def _apply_tmdb_pick_page_to_meta(
+    meta: dict,
+    query_text: str,
+    *,
+    media_type: str,
+    parsed: dict | None,
+    page: int = 1,
+    filter_type: str = "all",
+) -> dict:
+    pick = await _fetch_tmdb_pick_page(
+        query_text,
+        media_type=media_type,
+        parsed=parsed,
+        page=page,
+        filter_type=filter_type,
+    )
+    meta["suggestions"] = pick.get("items") or []
+    meta["pick_page"] = page
+    meta["pick_has_more"] = bool(pick.get("has_more"))
+    meta["pick_filter"] = filter_type
+    meta["pick_query"] = query_text
+    meta["tmdb_unreachable"] = bool(tmdb_helper._last_api_error) and not meta["suggestions"]
+    return pick
+
+
+def _tmdb_load_more_row(
+    meta: dict, *, gid: int | None = None, file_id: int | None = None
+) -> list[InlineKeyboardButton]:
+    if not meta.get("pick_has_more"):
+        return []
+    if gid is not None:
+        return [
+            InlineKeyboardButton(
+                "📄 Load more results", callback_data=f"tpml:g:{gid}"
+            )
+        ]
+    if file_id is not None:
+        return [
+            InlineKeyboardButton(
+                "📄 Load more results", callback_data=f"tpml:f:{file_id}"
+            )
+        ]
+    return []
 
 
 def _format_batch_files_preview(group: dict, *, max_lines: int = 6) -> str:
@@ -306,22 +449,31 @@ async def reply_or_edit_query(
 ) -> None:
     """Edit the callback message, or send a new one if edit fails."""
     if getattr(query, "_message_anchor", False):
-        try:
-            await flood_reply_text(
-                query.message,
-                text=text,
-                parse_mode=ParseMode.HTML,
-                reply_markup=reply_markup,
-            )
-        except Exception as e:
-            logger.error("reply_text (message anchor) failed: %s", e)
+        await bot_edit_message(
+            context,
+            query.message.chat_id,
+            query.message.message_id,
+            text,
+            reply_markup,
+        )
+        return
+    if getattr(query, "_header_edit_anchor", False):
+        await bot_edit_message(
+            context,
+            query.message.chat_id,
+            query.message.message_id,
+            text,
+            reply_markup,
+        )
         return
     if await safe_edit_message(query, text, reply_markup=reply_markup):
         return
     try:
-        await query.message.reply_text(
+        bot = query.get_bot() if hasattr(query, "get_bot") else context.bot
+        await flood_send_message(
+            bot,
+            query.message.chat_id,
             text,
-            parse_mode=ParseMode.HTML,
             reply_markup=reply_markup,
         )
     except Exception as e:
@@ -369,10 +521,14 @@ def format_backfill_progress(
     forwarded: int,
     skipped: int,
     elapsed_s: float,
+    duplicates: int = 0,
 ) -> str:
     mins, secs = divmod(int(elapsed_s), 60)
     elapsed = f"{mins}m {secs}s" if mins else f"{secs}s"
     media_label = "Media found" if "dry" in mode_label.lower() else "Media forwarded"
+    dup_line = ""
+    if duplicates:
+        dup_line = f"Already in library (dupes): <b>{duplicates:,}</b>\n"
     return (
         f"▶️ <b>{escape(mode_label)}</b>\n\n"
         f"Source: <b>{escape(source_label)}</b>\n"
@@ -381,7 +537,8 @@ def format_backfill_progress(
         f"⏱ Elapsed: <b>{elapsed}</b>\n\n"
         f"Messages scanned: <b>{scanned:,}</b>\n"
         f"{media_label}: <b>{forwarded:,}</b>\n"
-        f"Skipped (no media): <b>{skipped:,}</b>\n\n"
+        f"Skipped (no media): <b>{skipped:,}</b>\n"
+        f"{dup_line}\n"
         "<i>Live updates — safe to browse other menus while this runs.</i>"
     )
 
@@ -405,6 +562,21 @@ def _ingest_channel_id_str() -> str | None:
     return str(ingest.channel_id) if ingest else None
 
 
+def _forward_source_chat(message):
+    """Channel/group chat from a forwarded message (PTB v20+ forward_origin, legacy fallback)."""
+    origin = getattr(message, "forward_origin", None)
+    if isinstance(origin, MessageOriginChannel) and origin.chat:
+        return origin.chat
+    if origin is not None:
+        chat = getattr(origin, "chat", None) or getattr(origin, "sender_chat", None)
+        if chat and getattr(chat, "type", None) in _MONITORABLE_CHAT_TYPES:
+            return chat
+    legacy = getattr(message, "forward_from_chat", None)
+    if legacy and legacy.type in _MONITORABLE_CHAT_TYPES:
+        return legacy
+    return None
+
+
 def resolve_forward_source_channel(message) -> str | None:
     """
     Channel id of the original archive when this post is a forward.
@@ -422,16 +594,13 @@ def resolve_forward_source_channel(message) -> str | None:
             return None
         return cid
 
-    origin = getattr(message, "forward_origin", None)
-    if isinstance(origin, MessageOriginChannel) and origin.chat:
-        register_chat_channel(origin.chat, log_source="forward_origin")
-        got = _accept(str(origin.chat.id))
-        if got:
-            return got
-    legacy = getattr(message, "forward_from_chat", None)
-    if legacy and legacy.type in _MONITORABLE_CHAT_TYPES:
-        register_chat_channel(legacy, log_source="forward_from_chat")
-        got = _accept(str(legacy.id))
+    chat = _forward_source_chat(message)
+    if chat:
+        log_source = (
+            "forward_origin" if getattr(message, "forward_origin", None) else "forward_from_chat"
+        )
+        register_chat_channel(chat, log_source=log_source)
+        got = _accept(str(chat.id))
         if got:
             return got
     try:
@@ -442,15 +611,22 @@ def resolve_forward_source_channel(message) -> str | None:
         return None
 
 
-def register_chat_channel(chat, *, log_source: str = "unknown") -> Channel | None:
+def register_chat_channel(
+    chat, *, log_source: str = "unknown", bot_can_post: bool | None = None
+) -> Channel | None:
     """Save a Telegram chat to the channels table if it is a channel/group we can monitor."""
     if chat.type not in _MONITORABLE_CHAT_TYPES:
         return None
+    if bot_can_post is None:
+        from bot_channel_access import BOT_POST_LOG_SOURCES
+
+        bot_can_post = log_source in BOT_POST_LOG_SOURCES
     try:
         channel = db.auto_register_channel(
             channel_id=str(chat.id),
             channel_username=getattr(chat, "username", None),
             channel_title=chat.title,
+            bot_can_post=bool(bot_can_post),
         )
         logger.info(
             "Registered channel via %s: %s (%s)",
@@ -571,6 +747,16 @@ def _tmdb_header_msg_key(*, file_id: int | None = None, match_key: str | None = 
     return f"tmdb_header_msg_{file_id}"
 
 
+def _bulk_tmdb_header_match_key(
+    context: ContextTypes.DEFAULT_TYPE, match_key: str
+) -> str:
+    """User-data key for bulk TMDB header (group id when available)."""
+    group = _resolve_pending_group(context, match_key)
+    if group and group.get("group_id") is not None:
+        return str(group["group_id"])
+    return str(match_key)
+
+
 async def _clear_tmdb_suggestion_cards(
     context: ContextTypes.DEFAULT_TYPE,
     chat_id: int,
@@ -641,6 +827,169 @@ async def _finish_tmdb_pick_success(
         logger.warning("Send TMDB pick success fallback failed: %s", e)
 
 
+def _next_pending_map_target(
+    *,
+    skip_match_key: str | None = None,
+    skip_file_id: int | None = None,
+) -> dict | None:
+    """Next batch group or single file to map (batches first)."""
+    pending = db.get_pending_confirmations(limit=Config.PENDING_SCAN_LIMIT)
+    if not pending:
+        return None
+    groups = build_pending_groups(pending, parser=parser)
+    batched_ids = batched_pending_file_ids(groups)
+    for group in groups:
+        if group.get("deferred"):
+            continue
+        if skip_match_key and group["match_key"] == skip_match_key:
+            continue
+        return {"kind": "batch", "match_key": group["match_key"]}
+    for upload in pending:
+        if upload.id in batched_ids:
+            continue
+        if getattr(upload, "pending_deferred_at", None):
+            continue
+        if skip_file_id is not None and upload.id == skip_file_id:
+            continue
+        return {
+            "kind": "file",
+            "file_id": upload.id,
+            "file_name": upload.file_name,
+            "parsed_name": upload.parsed_name,
+        }
+    return None
+
+
+def _refresh_pending_groups_context(context: ContextTypes.DEFAULT_TYPE) -> None:
+    pending_files = db.get_pending_confirmations(limit=Config.PENDING_SCAN_LIMIT)
+    groups = build_pending_groups(pending_files, parser=parser)
+    context.user_data["pending_groups"] = groups
+    context.user_data["pending_groups_by_key"] = {g["match_key"]: g for g in groups}
+    _sync_pending_bulk_map(context, groups)
+
+
+async def _finish_pending_map_and_continue(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    chat_id: int,
+    success_text: str,
+    query=None,
+    from_user=None,
+    file_id: int | None = None,
+    match_key: str | None = None,
+) -> None:
+    """Show map success, then open the next pending batch/file (pending queue only)."""
+    if query is not None:
+        chat_id = query.message.chat_id
+        from_user = getattr(query, "from_user", None)
+
+    if context.user_data.get("remap_back_cb"):
+        back_cb = context.user_data.get("remap_back_cb", "pending_menu")
+        back_label = context.user_data.get("remap_back_label", "« Pending")
+        await _finish_tmdb_pick_success(
+            context,
+            chat_id,
+            success_text,
+            InlineKeyboardMarkup(
+                [[InlineKeyboardButton(back_label, callback_data=back_cb)]]
+            ),
+            file_id=file_id,
+            match_key=match_key,
+        )
+        return
+
+    await _clear_tmdb_suggestion_cards(
+        context, chat_id, file_id=file_id, match_key=match_key
+    )
+    header_id = context.user_data.pop(
+        _tmdb_header_msg_key(file_id=file_id, match_key=match_key), None
+    )
+    if header_id is None and query is not None:
+        header_id = query.message.message_id
+
+    skip_key = match_key
+    if match_key and str(match_key).isdigit():
+        group = _resolve_pending_group(context, match_key)
+        if group:
+            skip_key = group["match_key"]
+
+    next_target = _next_pending_map_target(
+        skip_match_key=skip_key,
+        skip_file_id=file_id,
+    )
+    remaining = db.count_pending_confirmations()
+
+    if not next_target:
+        done_text = success_text
+        if remaining > 0:
+            done_text += (
+                f"\n\n<i>{remaining:,} file(s) still pending — open /menu → Pending.</i>"
+            )
+        else:
+            done_text += "\n\n✅ <b>All caught up — nothing left to map!</b>"
+        markup = InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("« Pending list", callback_data="pending_menu")],
+                [InlineKeyboardButton("« Main menu", callback_data="main_menu")],
+            ]
+        )
+        if header_id:
+            await bot_edit_message(context, chat_id, header_id, done_text, markup)
+        else:
+            await flood_send_message(context.bot, chat_id, done_text, reply_markup=markup)
+        return
+
+    if header_id:
+        await bot_edit_message(
+            context,
+            chat_id,
+            header_id,
+            f"{success_text}\n\n⏳ <b>Opening next pending…</b>",
+            None,
+        )
+    else:
+        msg = await flood_send_message(
+            context.bot,
+            chat_id,
+            f"{success_text}\n\n⏳ <b>Opening next pending…</b>",
+        )
+        header_id = msg.message_id
+
+    anchor = HeaderEditAnchor(context.bot, chat_id, header_id, from_user)
+    _refresh_pending_groups_context(context)
+
+    async def _open_next() -> None:
+        try:
+            if next_target["kind"] == "batch":
+                await _run_bulk_tmdb_pick_job(anchor, context, next_target["match_key"])
+            else:
+                await _run_tmdb_pick_job(
+                    anchor,
+                    context,
+                    next_target["file_id"],
+                    file_name=next_target["file_name"],
+                    parsed_name=next_target["parsed_name"],
+                )
+        except Exception as e:
+            logger.exception("Auto-advance pending failed")
+            await bot_edit_message(
+                context,
+                chat_id,
+                header_id,
+                f"{success_text}\n\n❌ <b>Could not open next pending</b>\n"
+                f"<code>{escape(str(e))}</code>",
+                InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("« Pending", callback_data="pending_menu")]]
+                ),
+            )
+
+    _fire_interactive_job(
+        context.application,
+        "Pending auto-advance",
+        _open_next,
+    )
+
+
 def _browse_back_callback_data(context) -> str:
     if context.user_data.get("browse_scope") == "all":
         return "library_all"
@@ -655,9 +1004,14 @@ def _browse_entry_title(entry) -> str:
 
 
 def format_library_button_label(entry: dict, *, max_len: int = 64) -> str:
-    """🎬 movie vs 📺 series, year, and TMDB rating on library buttons."""
+    """🎬 movie vs 📺 series vs 🎓 course on library buttons."""
     mt = (entry.get("media_type") or "movie").lower()
-    icon = "📺" if mt in ("tv", "series") else "🎬"
+    if mt == "course":
+        icon = "🎓"
+    elif mt in ("tv", "series"):
+        icon = "📺"
+    else:
+        icon = "🎬"
     title = (entry.get("title") or "?").strip()
     if len(title) > 26:
         title = title[:23] + "…"
@@ -1172,6 +1526,11 @@ async def send_watch_pick(query, context, upload_id: int) -> bool:
         link = message_link_for_upload(upload)
         if link:
             rows.append([InlineKeyboardButton("📎 Source channel", url=link)])
+    from delivery_handoff import external_downloader_row
+
+    ext_row = external_downloader_row(upload.id)
+    if ext_row:
+        rows.append(ext_row)
     await _refresh_watch_hub_after_send(
         query, context, upload, ct, quality=quality, admin_user=admin_user, is_tv=is_tv
     )
@@ -1243,10 +1602,15 @@ async def _refresh_watch_hub_after_send(
         return
 
     if admin_user:
+        from delivery_handoff import external_downloader_row
+
         rows = []
         link = message_link_for_upload(upload)
         if link:
             rows.append([InlineKeyboardButton("📎 Source channel", url=link)])
+        ext_row = external_downloader_row(upload.id)
+        if ext_row:
+            rows.append(ext_row)
         rows.append([InlineKeyboardButton("« Back", callback_data=back_cb)])
         text = build_delivery_text(upload, ct, quality=quality, admin=True)
         text = f"{text}\n\n<i>↑ File sent above — menu below.</i>"
@@ -1523,13 +1887,13 @@ async def send_pending_menu(
         keyboard.append(
             [
                 InlineKeyboardButton(
-                    f"🔄 Retry TMDB (all {total} pending)",
+                    f"🔄 Retry TMDB (all {total:,} pending)",
                     callback_data="pending_retry_all",
                 )
             ]
         )
         lines.append(
-            "<i>Network blip? Retry TMDB re-searches every pending file.</i>"
+            "<i>Network blip? Retry TMDB re-searches every pending video/audio file.</i>"
         )
         lines.append("")
     if display_groups:
@@ -1589,10 +1953,40 @@ async def send_pending_menu(
     await _reply_or_edit(target, "\n".join(lines), InlineKeyboardMarkup(keyboard), edit=edit)
 
 
+_TMDB_BULK_RETRY_KEY = "tmdb_bulk_retry"
+
+
+def _tmdb_bulk_retry_cancelled(application) -> bool:
+    state = application.bot_data.get(_TMDB_BULK_RETRY_KEY) or {}
+    return bool(state.get("active") and state.get("cancel"))
+
+
+def _tmdb_bulk_retry_progress_keyboard(return_page: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "⏹ Stop retry",
+                    callback_data="pending_retry_stop",
+                )
+            ],
+        ]
+    )
+
+
+def request_tmdb_bulk_retry_stop(application) -> bool:
+    """Request cooperative cancel of the running bulk TMDB retry."""
+    state = application.bot_data.get(_TMDB_BULK_RETRY_KEY)
+    if state and state.get("active") and not state.get("cancel"):
+        state["cancel"] = True
+        return True
+    return False
+
+
 async def run_retry_all_pending_tmdb(
     update: Update, context: ContextTypes.DEFAULT_TYPE, *, edit: bool = False
 ) -> None:
-    """Admin: re-run TMDB lookup for every pending file (e.g. after network errors)."""
+    """Admin: re-run TMDB lookup for every pending file (inline progress)."""
     user_id = update.effective_user.id if update.effective_user else 0
     if not is_admin(user_id):
         if update.callback_query:
@@ -1604,6 +1998,15 @@ async def run_retry_all_pending_tmdb(
         return
 
     app = context.application
+    if (app.bot_data.get(_TMDB_BULK_RETRY_KEY) or {}).get("active"):
+        if update.callback_query:
+            await update.callback_query.answer(
+                "TMDB retry already running.", show_alert=True
+            )
+        return
+    if await bot_busy.reject_if_exclusive_busy(update, context):
+        return
+
     query = update.callback_query
     return_page = int(context.user_data.get("pending_page", 0))
     wait_text = (
@@ -1612,13 +2015,23 @@ async def run_retry_all_pending_tmdb(
         "<i>Re-parses filenames and searches TMDB again. "
         "Strong matches are auto-confirmed.</i>"
     )
+    progress_kb = _tmdb_bulk_retry_progress_keyboard(return_page)
     if edit and query:
         status = query.message
-        await safe_edit_callback_message(query, wait_text, parse_mode=ParseMode.HTML)
+        await safe_edit_callback_message(
+            query, wait_text, parse_mode=ParseMode.HTML, reply_markup=progress_kb
+        )
     else:
-        status = await update.message.reply_text(wait_text, parse_mode=ParseMode.HTML)
+        status = await update.message.reply_text(
+            wait_text, parse_mode=ParseMode.HTML, reply_markup=progress_kb
+        )
 
     async def _job() -> None:
+        app.bot_data[_TMDB_BULK_RETRY_KEY] = {
+            "active": True,
+            "cancel": False,
+            "return_page": return_page,
+        }
         stats = {
             "total": 0,
             "scanned": 0,
@@ -1632,12 +2045,13 @@ async def run_retry_all_pending_tmdb(
             if not force and stats["scanned"] % 10 != 0 and stats["scanned"] != stats["total"]:
                 return
             try:
+                remaining = await asyncio.to_thread(db.count_pending_confirmations)
                 lines = [
                     "⏳ <b>Retrying TMDB for pending files…</b>",
                     "",
                     f"Progress: <b>{stats['scanned']}</b> / <b>{stats['total']}</b>",
                     f"Auto-matched: <b>{stats['matched']}</b>",
-                    f"Still pending: <b>{stats['still_pending']}</b>",
+                    f"Still pending: <b>{remaining}</b>",
                 ]
                 if stats["api_errors"]:
                     lines.append(
@@ -1650,12 +2064,16 @@ async def run_retry_all_pending_tmdb(
                     status.chat_id,
                     status.message_id,
                     "\n".join(lines),
+                    progress_kb,
                 )
             except Exception:
                 pass
 
+        stopped = False
         try:
-            pending = await asyncio.to_thread(db.get_pending_confirmations, 5000)
+            pending = await asyncio.to_thread(
+                db.get_pending_confirmations, Config.PENDING_SCAN_LIMIT
+            )
             stats["total"] = len(pending)
             if not pending:
                 await bot_edit_message(
@@ -1670,6 +2088,9 @@ async def run_retry_all_pending_tmdb(
                 return
 
             for upload in pending:
+                if _tmdb_bulk_retry_cancelled(app):
+                    stopped = True
+                    break
                 stats["scanned"] += 1
                 try:
                     meta = await asyncio.to_thread(
@@ -1700,19 +2121,34 @@ async def run_retry_all_pending_tmdb(
                 await asyncio.sleep(0.05)
 
             await _progress(force=True)
-            remaining = await asyncio.to_thread(db.get_pending_confirmations, 5000)
-            lines = [
-                "<b>✅ TMDB retry complete</b>",
-                "",
-                f"Scanned: <b>{stats['scanned']}</b>",
-                f"Auto-matched: <b>{stats['matched']}</b>",
-                f"Still need confirmation: <b>{len(remaining)}</b>",
-            ]
-            if stats["api_errors"]:
-                lines.append(
-                    f"\nTMDB could not be reached for <b>{stats['api_errors']}</b> "
-                    "file(s) — try again later if that was a network issue."
-                )
+            remaining = await asyncio.to_thread(
+                db.count_pending_confirmations
+            )
+            if stopped:
+                lines = [
+                    "<b>⏹ TMDB retry stopped</b>",
+                    "",
+                    f"Scanned before stop: <b>{stats['scanned']}</b> / <b>{stats['total']}</b>",
+                    f"Auto-matched: <b>{stats['matched']}</b>",
+                    f"Still need confirmation: <b>{remaining}</b>",
+                ]
+                if stats["api_errors"]:
+                    lines.append(
+                        f"\nTMDB errors (likely network): <b>{stats['api_errors']}</b>"
+                    )
+            else:
+                lines = [
+                    "<b>✅ TMDB retry complete</b>",
+                    "",
+                    f"Scanned: <b>{stats['scanned']}</b>",
+                    f"Auto-matched: <b>{stats['matched']}</b>",
+                    f"Still need confirmation: <b>{remaining}</b>",
+                ]
+                if stats["api_errors"]:
+                    lines.append(
+                        f"\nTMDB could not be reached for <b>{stats['api_errors']}</b> "
+                        "file(s) — try again later if that was a network issue."
+                    )
             if stats["errors"]:
                 lines.append(f"\nErrors: <b>{stats['errors']}</b> (see bot.log)")
             keyboard = InlineKeyboardMarkup(
@@ -1744,6 +2180,8 @@ async def run_retry_all_pending_tmdb(
                     [[InlineKeyboardButton("« Pending", callback_data="pending_menu")]]
                 ),
             )
+        finally:
+            app.bot_data.pop(_TMDB_BULK_RETRY_KEY, None)
 
     _fire_background_job(app, "Retry all pending TMDB", _job, exclusive=True)
 
@@ -1902,17 +2340,16 @@ async def send_bulk_tmdb_pick_ui(
         meta["local_name"] = search_query_override
         meta["manual_search_query"] = search_query_override
         if tmdb_helper.enabled:
-            meta["suggestions"] = await _manual_tmdb_search(
+            await _apply_tmdb_pick_page_to_meta(
+                meta,
                 search_query_override,
                 media_type=media_type,
                 parsed=meta.get("parsed"),
             )
-            meta["tmdb_unreachable"] = bool(tmdb_helper._last_api_error) and not meta[
-                "suggestions"
-            ]
         else:
             meta["suggestions"] = []
             meta["tmdb_unreachable"] = False
+            meta["pick_has_more"] = False
         display_show = search_query_override
     else:
         try:
@@ -1933,6 +2370,15 @@ async def send_bulk_tmdb_pick_ui(
         display_show = search_show or show_name
         if parsed.get("year"):
             display_show = f"{display_show} ({parsed['year']})"
+        if tmdb_helper.enabled and not search_query_override:
+            q = meta.get("search_name") or show_name
+            if q:
+                await _apply_tmdb_pick_page_to_meta(
+                    meta,
+                    q,
+                    media_type=media_type,
+                    parsed=meta.get("parsed"),
+                )
     show_name = display_show
 
     suggestions = list(meta.get("suggestions") or [])
@@ -1953,9 +2399,11 @@ async def send_bulk_tmdb_pick_ui(
         ]
         if suggestions:
             lines.append(
-                f"<b>{min(len(suggestions), 5)} match(es)</b> below — "
-                "scroll down and tap <b>Select this title</b>."
+                f"<b>{len(suggestions)} match(es)</b> below (TV + movies) — "
+                "scroll and tap <b>Select this title</b>."
             )
+            if meta.get("pick_has_more"):
+                lines.append("Tap <b>Load more results</b> for the next page.")
         elif meta.get("tmdb_unreachable"):
             lines.append(
                 "Could not reach TMDB (network). Wait a moment, then tap "
@@ -1981,11 +2429,12 @@ async def send_bulk_tmdb_pick_ui(
         if not tmdb_helper.enabled:
             lines.append("TMDB is not configured.")
         elif suggestions:
-            n_sug = min(len(suggestions), 5)
             lines.append(
-                f"<b>{n_sug} TMDB match(es)</b> — scroll down; each has poster, plot, and "
+                f"<b>{len(suggestions)} TMDB match(es)</b> (TV + movies) — scroll; each has poster, plot, and "
                 "<b>Select this title</b>."
             )
+            if meta.get("pick_has_more"):
+                lines.append("Tap <b>Load more results</b> for the next page.")
         elif meta.get("tmdb_unreachable"):
             lines.append("Could not reach TMDB (network).")
         else:
@@ -2012,6 +2461,9 @@ async def send_bulk_tmdb_pick_ui(
             ]
         )
     keyboard.extend(_tmdb_pick_extra_rows(gid=gid))
+    load_more = _tmdb_load_more_row(meta, gid=gid)
+    if load_more:
+        keyboard.append(load_more)
     keyboard.append(
         [
             InlineKeyboardButton(
@@ -2065,17 +2517,16 @@ async def send_tmdb_pick_ui(
         meta["local_name"] = search_query_override
         meta["manual_search_query"] = search_query_override
         if tmdb_helper.enabled:
-            meta["suggestions"] = await _manual_tmdb_search(
+            await _apply_tmdb_pick_page_to_meta(
+                meta,
                 search_query_override,
                 media_type=media_type,
                 parsed=parsed,
             )
-            meta["tmdb_unreachable"] = bool(tmdb_helper._last_api_error) and not meta[
-                "suggestions"
-            ]
         else:
             meta["suggestions"] = []
             meta["tmdb_unreachable"] = False
+            meta["pick_has_more"] = False
     else:
         try:
             meta = await _load_pick_metadata(file_name)
@@ -2089,6 +2540,14 @@ async def send_tmdb_pick_ui(
                 "show_group_key": show_group_key(parsed, file_name),
                 "suggestions": [],
             }
+        if tmdb_helper.enabled:
+            q = meta.get("search_name") or meta.get("local_name")
+            parsed0 = meta.get("parsed") or {}
+            mt0 = meta.get("media_type") or "movie"
+            if q:
+                await _apply_tmdb_pick_page_to_meta(
+                    meta, q, media_type=mt0, parsed=parsed0
+                )
     suggestions = list(meta.get("suggestions") or [])
     context.user_data[_tmdb_sug_key(file_id)] = suggestions
     context.user_data[f"tmdb_meta_{file_id}"] = meta
@@ -2116,9 +2575,11 @@ async def send_tmdb_pick_ui(
         ]
         if suggestions:
             lines.append(
-                f"<b>{min(len(suggestions), 5)} match(es)</b> below — "
+                f"<b>{len(suggestions)} match(es)</b> below (TV + movies) — "
                 "tap <b>Select this title</b>."
             )
+            if meta.get("pick_has_more"):
+                lines.append("Tap <b>Load more results</b> for the next page.")
         elif meta.get("tmdb_unreachable"):
             lines.append(
                 "Could not reach TMDB (network). Wait, then tap <b>Retry TMDB search</b>."
@@ -2151,11 +2612,12 @@ async def send_tmdb_pick_ui(
         if not tmdb_helper.enabled:
             lines.append("TMDB is not configured — use the buttons below.")
         elif suggestions:
-            n_sug = min(len(suggestions), 5)
             lines.append(
-                f"<b>{n_sug} TMDB match(es)</b> below — each message has poster, plot, and "
+                f"<b>{len(suggestions)} TMDB match(es)</b> below (TV + movies) — poster, plot, "
                 "<b>Select this title</b>."
             )
+            if meta.get("pick_has_more"):
+                lines.append("Tap <b>Load more results</b> for the next page.")
         elif meta.get("tmdb_unreachable"):
             lines.append(
                 "Could not reach TMDB (network) — tap <b>Retry search</b> or use <b>Custom title</b>."
@@ -2190,6 +2652,9 @@ async def send_tmdb_pick_ui(
         )
 
     keyboard.extend(_tmdb_pick_extra_rows(file_id=file_id))
+    load_more = _tmdb_load_more_row(meta, file_id=file_id)
+    if load_more:
+        keyboard.append(load_more)
 
     keyboard.append(
         [
@@ -2510,6 +2975,7 @@ def _apply_skip_catalog_file(file_id: int, *, library_only: bool):
         episode_title=parsed.get("episode_title"),
         library_visible=library_only,
         catalog_excluded=True,
+        indexed_only=True,
     )
 
 
@@ -2583,6 +3049,9 @@ async def run_verify_posts_sweep(
         return
 
     app = context.application
+    if await bot_busy.reject_if_exclusive_busy(update, context):
+        return
+
     query = update.callback_query
     if edit and query:
         status = query.message
@@ -2698,7 +3167,7 @@ async def send_channels_picker(
 
     title = (
         "<b>🔍 Browse connected channels</b>\n\n"
-        "<i>📥 ingest · 🤖 live · 📜 historical · 👤📜 user-only historical · ⏳ not ingested</i>"
+        "<i>📥 ingest · 🤖 live · 📡 member watch · 📜 historical · 👤📜 user-only · ⏳ not ingested</i>"
     )
     text, markup = build_channel_picker(
         channels,
@@ -2735,10 +3204,11 @@ async def send_channels_menu(update: Update, context: ContextTypes.DEFAULT_TYPE,
     ]
     if ingest:
         lines.append(
-            f"\n📥 <b>Historical ingest channel:</b> {escape(channel_button_label(ingest))}"
+            f"\n📥 <b>Ingest sink:</b> {escape(channel_button_label(ingest))} "
+            f"(<i>change in Library setup</i>)"
         )
     else:
-        lines.append("\n📥 <b>Historical ingest channel:</b> not set — use /backfill")
+        lines.append("\n📥 <b>Ingest sink:</b> not set — <b>⚙️ Library setup</b>")
     lines.extend(
         [
             "",
@@ -2954,76 +3424,29 @@ async def start_create_list_ui(update: Update, context: ContextTypes.DEFAULT_TYP
     )
 
 
-def build_tracking_entries(filter_kind: str = "all") -> list[dict]:
+def build_tracking_entries(
+    filter_kind: str = "all", completion: str = "all"
+) -> list[dict]:
     """Build admin tracking list: TV shows, TMDB collections, multipart movies."""
-    entries: list[dict] = []
-    indexed_movie_ids = db.get_indexed_movie_tmdb_ids()
-    seen_collections: set[int] = set()
+    from portal.tracking_service import list_tracking_entries
 
-    if filter_kind in ("all", "tv"):
-        for row in db.get_tracking_tv_shows():
-            stats = db.get_indexed_episode_stats(row["content_title_id"])
-            tmdb_episodes = None
-            if row.get("tmdb_id") and tmdb_helper.enabled:
-                tr = tmdb_helper.fetch_tv_tracking(int(row["tmdb_id"]))
-                if tr:
-                    tmdb_episodes = tr.get("number_of_episodes")
-            entries.append(
-                {
-                    "kind": "tv",
-                    "title": row["title"],
-                    "content_title_id": row["content_title_id"],
-                    "tmdb_id": row.get("tmdb_id"),
-                    "callback": f"tracking_tv:{row['content_title_id']}",
-                    "indexed_episodes": stats["indexed_episodes"],
-                    "indexed_seasons": stats["indexed_seasons"],
-                    "tmdb_episodes": tmdb_episodes,
-                }
-            )
-
-    if filter_kind in ("all", "franchise"):
-        for row in db.get_tracking_multipart_movies():
-            total = row.get("total_parts") or len(row["indexed_parts"])
-            entries.append(
-                {
-                    "kind": "multipart",
-                    "title": row["title"],
-                    "content_title_id": row["content_title_id"],
-                    "callback": f"tracking_mp:{row['content_title_id']}",
-                    "indexed_parts": len(row["indexed_parts"]),
-                    "total_parts": total,
-                    "part_set": row["indexed_parts"],
-                }
-            )
-        if tmdb_helper.enabled:
-            for movie in db.get_movie_rows_for_tracking():
-                if movie.get("franchise_sequence"):
-                    continue
-                coll = tmdb_helper.fetch_collection_for_movie(movie["tmdb_id"])
-                if not coll:
-                    continue
-                cid = coll["collection_id"]
-                if cid in seen_collections:
-                    continue
-                ccounts = collection_tracking_counts(
-                    coll["parts"], indexed_movie_ids
-                )
-                if not ccounts["indexed_released"] and not ccounts["released_count"]:
-                    continue
-                seen_collections.add(cid)
-                entries.append(
-                    {
-                        "kind": "collection",
-                        "title": coll["name"],
-                        "collection_id": cid,
-                        "callback": f"tracking_col:{cid}",
-                        "indexed_parts": ccounts["indexed_released"],
-                        "total_parts": ccounts["released_count"],
-                        "upcoming_count": ccounts["upcoming_count"],
-                        "parts": coll["parts"],
-                    }
-                )
-    return entries
+    items, _, _ = list_tracking_entries(
+        filter_kind,
+        completion=completion,
+        page=1,
+        page_size=500,
+        fetch_tmdb=True,
+        fetch_page_tmdb=True,
+    )
+    for entry in items:
+        kind = entry.get("kind")
+        if kind == "tv" and entry.get("content_title_id"):
+            entry["callback"] = f"tracking_tv:{entry['content_title_id']}"
+        elif kind == "multipart" and entry.get("content_title_id"):
+            entry["callback"] = f"tracking_mp:{entry['content_title_id']}"
+        elif kind == "collection" and entry.get("collection_id"):
+            entry["callback"] = f"tracking_col:{entry['collection_id']}"
+    return items
 
 
 async def send_tracking_menu(
@@ -3032,14 +3455,16 @@ async def send_tracking_menu(
     *,
     page: int = 0,
     filter_kind: str = "all",
+    completion: str = "all",
     edit=False,
 ):
     """Admin: TV / franchise upload progress vs TMDB."""
     query = update.callback_query
     target = query if edit and query else update
-    entries = build_tracking_entries(filter_kind)
+    entries = build_tracking_entries(filter_kind, completion)
     context.user_data["tracking_entries"] = entries
     context.user_data["tracking_filter"] = filter_kind
+    context.user_data["tracking_completion"] = completion
 
     lines = [
         "<b>📊 Tracking</b>",
@@ -3060,7 +3485,11 @@ async def send_tracking_menu(
         lines.append("\nTap a row for season/episode or franchise breakdown.")
 
     keyboard = build_tracking_list_keyboard(
-        entries, page=page, page_size=12, filter_kind=filter_kind
+        entries,
+        page=page,
+        page_size=12,
+        filter_kind=filter_kind,
+        completion=completion,
     )
     await _reply_or_edit(target, "\n".join(lines), keyboard, edit=edit)
 
@@ -3076,9 +3505,14 @@ async def send_tracking_tv_detail(
         tmdb_data = tmdb_helper.fetch_tv_tracking(int(ct.tmdb_id))
     text = format_tv_tracking_detail(title, stats, tmdb_data)
     filt = context.user_data.get("tracking_filter", "all")
+    comp = context.user_data.get("tracking_completion", "all")
     keyboard = InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("« Tracking", callback_data=f"tracking_page:0:{filt}")],
+            [
+                InlineKeyboardButton(
+                    "« Tracking", callback_data=f"tracking_page:0:{filt}:{comp}"
+                )
+            ],
             [InlineKeyboardButton("« Main menu", callback_data="main_menu")],
         ]
     )
@@ -3097,9 +3531,14 @@ async def send_tracking_collection_detail(
         coll["name"], coll["parts"], indexed_ids
     )
     filt = context.user_data.get("tracking_filter", "all")
+    comp = context.user_data.get("tracking_completion", "all")
     keyboard = InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("« Tracking", callback_data=f"tracking_page:0:{filt}")],
+            [
+                InlineKeyboardButton(
+                    "« Tracking", callback_data=f"tracking_page:0:{filt}:{comp}"
+                )
+            ],
             [InlineKeyboardButton("« Main menu", callback_data="main_menu")],
         ]
     )
@@ -3136,9 +3575,14 @@ async def send_tracking_multipart_detail(
         entry.get("total_parts"),
     )
     filt = context.user_data.get("tracking_filter", "all")
+    comp = context.user_data.get("tracking_completion", "all")
     keyboard = InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("« Tracking", callback_data=f"tracking_page:0:{filt}")],
+            [
+                InlineKeyboardButton(
+                    "« Tracking", callback_data=f"tracking_page:0:{filt}:{comp}"
+                )
+            ],
             [InlineKeyboardButton("« Main menu", callback_data="main_menu")],
         ]
     )
@@ -3146,17 +3590,27 @@ async def send_tracking_multipart_detail(
 
 
 async def send_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, *, edit=False):
-    """Route to user or admin home menu."""
-    if await bot_busy.reply_busy_message(update, context):
-        return
-    if update.effective_user and is_admin(update.effective_user.id):
-        await send_admin_main_menu(update, context, edit=edit)
+    """Route to user or admin home menu (always shows buttons, even during heavy jobs)."""
+    prefix = ""
+    user = update.effective_user
+    if (
+        user
+        and is_admin(user.id)
+        and bot_busy.is_busy(context.application)
+    ):
+        prefix = bot_busy.busy_banner_html(context.application)
+    if user and is_admin(user.id):
+        await send_admin_main_menu(update, context, edit=edit, prefix=prefix)
     else:
-        await watch_features.send_user_main_menu(update, context, edit=edit)
+        await watch_features.send_user_main_menu(update, context, edit=edit, prefix=prefix)
 
 
 async def send_admin_main_menu(
-    update: Update, context: ContextTypes.DEFAULT_TYPE, *, edit=False
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    edit=False,
+    prefix: str = "",
 ):
     """Indexer admin home — channel management, pending review, publish."""
     query = update.callback_query
@@ -3164,7 +3618,8 @@ async def send_admin_main_menu(
     summary = db.get_index_summary()
     tmdb_line = "✅ enabled" if tmdb_helper.enabled else "❌ not configured"
     text = (
-        "<b>📚 Index Bot</b> <i>(admin)</i>\n\n"
+        (prefix + "\n\n" if prefix else "")
+        + "<b>📚 Index Bot</b> <i>(admin)</i>\n\n"
         f"Indexed files: <b>{summary['total_uploads']}</b> · "
         f"Library titles: <b>{summary['unique_titles']}</b> · "
         f"Pending review: <b>{summary['pending']}</b>\n"
@@ -3172,6 +3627,7 @@ async def send_admin_main_menu(
         "Use the buttons below — no need to type channel or list names."
     )
     keyboard = [
+        [InlineKeyboardButton("⚙️ Library setup", callback_data="setup_hub")],
         [
             InlineKeyboardButton("🔍 Search library", callback_data="search_menu"),
             InlineKeyboardButton("📖 Browse titles", callback_data="library_browse"),
@@ -3188,7 +3644,11 @@ async def send_admin_main_menu(
             InlineKeyboardButton("⏳ Pending", callback_data="pending_menu"),
         ],
         [InlineKeyboardButton("📊 Tracking", callback_data="tracking_menu")],
+        [InlineKeyboardButton("📤 Upload pipeline", callback_data="up_hub")],
     ]
+    dup_n = db.count_duplicate_holds()
+    if dup_n:
+        text += f"\n\n⚠️ <b>{dup_n}</b> duplicate(s) need review — Upload pipeline."
     await _reply_or_edit(target, text, InlineKeyboardMarkup(keyboard), edit=edit)
 
 
@@ -3246,7 +3706,7 @@ async def send_library_browse_menu(
     else:
         lines.append(
             "TMDB / approved titles — tap to watch:\n"
-            "<i>🎬 movie · 📺 series · year · ★ rating</i>"
+            "<i>🎬 movie · 📺 series · 🎓 course · year · ★ rating</i>"
         )
         for i, entry in enumerate(titles):
             keyboard.append(
@@ -3342,6 +3802,7 @@ async def watch_help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/watch — browse & open the watch channel\n"
         "/favorites — your starred titles\n"
         "/watchlist — your saved lists\n"
+        "/portal — open web library (browser / TV)\n"
         "/request — ask for a title to be uploaded (TMDB)\n"
         "/menu — full bot menu\n\n"
         "<i>On each channel card, buttons open this bot for Watch, "
@@ -3364,6 +3825,12 @@ async def favorites_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def watchlist_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await watch_features.send_watchlists_menu(update, context)
+
+
+async def portal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    from portal_bot import portal_cmd as _portal_cmd
+
+    await _portal_cmd(update, context)
 
 
 async def watch_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3457,6 +3924,9 @@ async def run_channel_discovery(
         return
 
     app = context.application
+    if await bot_busy.reject_if_exclusive_busy(update, context):
+        return
+
     if edit and update.callback_query:
         query = update.callback_query
         status = query.message
@@ -3531,12 +4001,20 @@ async def run_channel_discovery(
 
             lines.append("")
             lines.append(
-                "<i>Only chats your user account can open are scanned. "
-                "Private archives you are not in will not appear.</i>"
+                "<i>Scans your Telegram dialogs plus re-checks known channel ids via the bot. "
+                "Private archives you are not in will not appear until you join them.</i>"
             )
 
+            back_cb = (
+                "setup_hub"
+                if context.user_data.get("setup_return") == "setup_hub"
+                else "channels_menu"
+            )
+            back_label = (
+                "« Library setup" if back_cb == "setup_hub" else "📺 Open channel list"
+            )
             keyboard = InlineKeyboardMarkup(
-                [[InlineKeyboardButton("📺 Open channel list", callback_data="channels_menu")]]
+                [[InlineKeyboardButton(back_label, callback_data=back_cb)]]
             )
             await bot_edit_message(
                 context,
@@ -3599,7 +4077,12 @@ async def add_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not channel:
             await update.message.reply_text("❌ Could not register this channel.")
             return
-        
+
+        from bot_channel_access import verify_bot_can_post
+
+        if await verify_bot_can_post(bot, str(chat.id)):
+            db.set_channel_bot_can_post(str(chat.id), True)
+
         await update.message.reply_text(
             f"✅ Channel @{channel_username} ({chat.title}) has been added to monitoring.\n\n"
             f"Make sure the bot is added as an admin to the channel with read permissions."
@@ -4082,22 +4565,34 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         session.close()
 
 
-async def send_set_ingest_channel_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, *, edit=False):
+async def send_set_ingest_channel_menu(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    edit=False,
+    back_callback: str = "backfill_menu",
+):
     """Pick which channel is the dedicated historical ingest channel."""
     query = update.callback_query
     target = query if edit and query else update
+    back_label = (
+        "« Library setup" if back_callback == "setup_hub" else "« Back to backfill guide"
+    )
 
-    channels = db.get_all_channels()
+    channels = db.get_channels_bot_can_post(active_only=True)
     if not channels:
         await _reply_or_edit(
             target,
-            "📭 No channels registered yet.\n\n"
-            "Create your ingest channel, add this bot as admin, post once or forward a message here.",
-            InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data="backfill_menu")]]),
+            "📭 No channels where the bot can post yet.\n\n"
+            "Create your ingest channel, add Index bot as <b>admin</b>, post once there, "
+            "or run <b>Discover bot channels</b>.",
+            InlineKeyboardMarkup(
+                [[InlineKeyboardButton(back_label, callback_data=back_callback)]]
+            ),
             edit=edit,
         )
         return
-    
+
     lines = [
         "<b>📥 Set historical ingest channel</b>",
         "",
@@ -4115,7 +4610,7 @@ async def send_set_ingest_channel_menu(update: Update, context: ContextTypes.DEF
                 )
             ]
         )
-    keyboard.append([InlineKeyboardButton("« Back to backfill guide", callback_data="backfill_menu")])
+    keyboard.append([InlineKeyboardButton(back_label, callback_data=back_callback)])
     await _reply_or_edit(target, "\n".join(lines), InlineKeyboardMarkup(keyboard), edit=edit)
 
 
@@ -4148,18 +4643,20 @@ async def send_backfill_guide(update: Update, context: ContextTypes.DEFAULT_TYPE
         "(permission to read posts is enough).\n\n"
         "<b>3.</b> Do <b>not</b> use this channel for normal day-to-day uploads. "
         "It is only the destination for forwarded old files.\n\n"
-        "<b>4.</b> Tell the bot which channel is the ingest channel:\n"
-        f"    {ingest_line}\n"
-        "    Tap the button below to select it from your connected channels.\n\n"
+        "<b>4.</b> Set the ingest channel under <b>⚙️ Library setup</b> on the admin menu:\n"
+        f"    {ingest_line}\n\n"
         "<b>5.</b> Start historical ingestion from a <b>source</b> channel — "
         "forwards old files into the ingest channel; the bot indexes each forward.\n"
         "    Use the button below (requires Telethon login on your PC).\n\n"
+        "<b>📡 Member watch</b> — for channels where <b>you</b> are a member but the "
+        "bot is not admin (e.g. Primeroom), new uploads are polled automatically via "
+        "Telethon every few minutes. Old posts still need step 5.\n\n"
         "<b>6.</b> Optional CLI dry run:\n"
         f"    <code>python forward_ingest.py @SourceChannel {escape(dest_hint)} --dry-run</code>\n\n"
         "Need API_ID / API_HASH in <code>.env</code> — see HOW_TO_RUN.md."
     )
     keyboard = [
-        [InlineKeyboardButton("📥 Register ingest channel", callback_data="set_ingest_channel_menu")],
+        [InlineKeyboardButton("⚙️ Set channels (Library setup)", callback_data="setup_hub")],
     ]
     if ingest:
         keyboard.append(
@@ -4171,13 +4668,16 @@ async def send_backfill_guide(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 def _backfill_source_channels() -> list:
     ingest_id = _ingest_channel_id_str()
-    return [
+    channels = [
         ch
-        for ch in db.get_all_channels()
-        if ch.is_active
-        and not getattr(ch, "is_ingest_channel", False)
+        for ch in db.get_all_channels_registered(active_only=False)
+        if not getattr(ch, "is_ingest_channel", False)
         and str(ch.channel_id) != ingest_id
     ]
+    return sorted(
+        channels,
+        key=lambda c: (not c.is_active, (c.channel_title or "").lower()),
+    )
 
 
 async def send_backfill_source_picker(
@@ -4201,13 +4701,15 @@ async def send_backfill_source_picker(
         "<b>▶️ Start historical ingestion</b>\n\n"
         f"Destination (ingest): <b>{escape(channel_button_label(ingest))}</b>\n\n"
         "Pick a <b>source</b> channel (ingest channel excluded).\n"
+        "<i>Missing a channel? Run <b>Discover bot channels</b> first (Library setup).</i>\n"
         "<i>Uses your Telethon user — same account as telethon_login.py.</i>"
     )
     index_stats = db.get_channel_index_stats()
 
     def _backfill_source_label(ch) -> str:
         st = index_stats.get(str(ch.channel_id), {})
-        return channel_list_label_with_status(
+        prefix = "⏸ " if not ch.is_active else ""
+        return prefix + channel_list_label_with_status(
             ch,
             live_count=st.get("live", 0),
             backfill_count=st.get("backfill", 0),
@@ -4246,7 +4748,7 @@ async def send_start_backfill_menu(
             "Register your ingest channel first, then start historical ingestion.",
             InlineKeyboardMarkup(
                 [
-                    [InlineKeyboardButton("📥 Register ingest channel", callback_data="set_ingest_channel_menu")],
+                    [InlineKeyboardButton("⚙️ Library setup", callback_data="setup_hub")],
                     [InlineKeyboardButton("« Back", callback_data="backfill_menu")],
                 ]
             ),
@@ -4293,19 +4795,26 @@ async def send_backfill_confirm(
         "<b>▶️ Historical ingestion</b>\n\n"
         f"<b>Source:</b> {escape(channel_button_label(source))}\n"
         f"<b>Destination:</b> {escape(channel_button_label(ingest))}\n\n"
-        "• <b>Dry run</b> — count indexable files only (no forwards)\n"
-        "• <b>Start</b> — forward old media into the ingest channel\n\n"
+        "• <b>Dry run</b> — count indexable + duplicate report\n"
+        "• <b>Start</b> — forward all indexable media\n"
+        "• <b>Start (skip dupes)</b> — skip files already in the library\n\n"
         "<i>Keep the bot running so forwards get indexed.</i>"
     )
     keyboard = [
         [
             InlineKeyboardButton(
-                "🔍 Dry run (count only)",
+                "🔍 Dry run",
                 callback_data=f"backfill_run:{channel_id}:dry",
             ),
+        ],
+        [
             InlineKeyboardButton(
                 "▶️ Start forwarding",
                 callback_data=f"backfill_run:{channel_id}:live",
+            ),
+            InlineKeyboardButton(
+                "▶️ Skip duplicates",
+                callback_data=f"backfill_run:{channel_id}:live_skip",
             ),
         ],
         [InlineKeyboardButton("« Choose another source", callback_data="backfill_start_menu")],
@@ -4319,6 +4828,7 @@ async def run_historical_ingest(
     channel_id: str,
     *,
     dry_run: bool = False,
+    skip_duplicates: bool = False,
     edit: bool = False,
 ) -> None:
     """Forward old media from source channel into ingest channel (Telethon)."""
@@ -4354,7 +4864,12 @@ async def run_historical_ingest(
             await update.message.reply_text(msg)
         return
 
-    mode_label = "Dry run" if dry_run else "Live forwarding"
+    if dry_run:
+        mode_label = "Dry run"
+    elif skip_duplicates:
+        mode_label = "Live (skip duplicates)"
+    else:
+        mode_label = "Live forwarding"
     source_name = channel_button_label(source)
     ingest_name = channel_button_label(ingest)
 
@@ -4413,7 +4928,7 @@ async def run_historical_ingest(
         start = time.monotonic()
         last_ui = 0.0
         phase = "Connecting to Telegram…"
-        counts = {"scanned": 0, "forwarded": 0, "skipped": 0}
+        counts = {"scanned": 0, "forwarded": 0, "skipped": 0, "duplicates": 0}
         heartbeat_stop = asyncio.Event()
 
         async def refresh_ui(force: bool = False) -> None:
@@ -4435,6 +4950,7 @@ async def run_historical_ingest(
                     forwarded=counts["forwarded"],
                     skipped=counts["skipped"],
                     elapsed_s=now - start,
+                    duplicates=counts["duplicates"],
                 ),
             )
 
@@ -4444,11 +4960,12 @@ async def run_historical_ingest(
                 if not heartbeat_stop.is_set():
                     await refresh_ui(force=True)
 
-        async def progress(scanned: int, forwarded: int, skipped: int) -> None:
+        async def progress(scanned: int, forwarded: int, skipped: int, duplicates: int = 0) -> None:
             nonlocal phase
             counts["scanned"] = scanned
             counts["forwarded"] = forwarded
             counts["skipped"] = skipped
+            counts["duplicates"] = duplicates
             if scanned == 0:
                 phase = "Connected — starting scan…"
             else:
@@ -4469,7 +4986,7 @@ async def run_historical_ingest(
             phase = "Scanning channel history…"
             await refresh_ui(force=True)
 
-            scanned, forwarded, skipped = await run_forward(
+            scanned, forwarded, skipped, duplicates = await run_forward(
                 source=source_ref,
                 dest=dest,
                 session_path=session_path,
@@ -4479,6 +4996,7 @@ async def run_historical_ingest(
                 batch_size=15,
                 delay_s=2.0,
                 dry_run=dry_run,
+                skip_duplicates=skip_duplicates,
                 progress_callback=progress,
                 source_peer_id=source.channel_id,
                 dest_peer_id=ingest.channel_id,
@@ -4487,21 +5005,28 @@ async def run_historical_ingest(
             )
 
             if dry_run:
+                new_est = max(0, forwarded - duplicates)
                 summary = (
                     "<b>✅ Dry run complete</b>\n\n"
                     f"Source: <b>{escape(source_name)}</b>\n"
                     f"Messages scanned: <b>{scanned:,}</b>\n"
-                    f"Would forward: <b>{forwarded:,}</b> media message(s)\n"
-                    f"Skipped: <b>{skipped:,}</b>\n\n"
-                    "Tap <b>Start forwarding</b> when ready."
+                    f"Indexable media: <b>{forwarded:,}</b>\n"
+                    f"Already in library: <b>{duplicates:,}</b>\n"
+                    f"Would forward (new): <b>{new_est:,}</b>\n"
+                    f"Skipped (no media): <b>{skipped:,}</b>\n\n"
+                    "Choose how to forward when ready."
                 )
                 keyboard = InlineKeyboardMarkup(
                     [
                         [
                             InlineKeyboardButton(
-                                "▶️ Start forwarding",
+                                "▶️ Forward all",
                                 callback_data=f"backfill_run:{channel_id}:live",
-                            )
+                            ),
+                            InlineKeyboardButton(
+                                "▶️ Skip dupes",
+                                callback_data=f"backfill_run:{channel_id}:live_skip",
+                            ),
                         ],
                         [InlineKeyboardButton("« Back", callback_data="backfill_start_menu")],
                     ]
@@ -4517,7 +5042,8 @@ async def run_historical_ingest(
                     f"Source: <b>{escape(source_name)}</b>\n"
                     f"Messages scanned: <b>{scanned:,}</b>\n"
                     f"Forwarded: <b>{forwarded:,}</b>\n"
-                    f"Skipped: <b>{skipped:,}</b>\n\n"
+                    f"Duplicates skipped: <b>{duplicates:,}</b>\n"
+                    f"Skipped (no media): <b>{skipped:,}</b>\n\n"
                     "Marked as <b>📜 historically ingested</b> in Connected channels.\n"
                     "Check your ingest channel — the bot should index new forwards."
                 )
@@ -4627,9 +5153,16 @@ async def handle_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TY
     )
 
     if new_status in _JOIN_STATUSES:
-        register_chat_channel(chat, log_source="my_chat_member")
+        can_post = new_status in (
+            ChatMemberStatus.ADMINISTRATOR,
+            ChatMemberStatus.OWNER,
+        )
+        register_chat_channel(chat, log_source="my_chat_member", bot_can_post=can_post)
+        if can_post:
+            db.set_telethon_watch_enabled(str(chat.id), False)
     elif new_status in _LEFT_STATUSES:
         db.set_channel_active(str(chat.id), False)
+        db.set_channel_bot_can_post(str(chat.id), False)
         logger.info("Deactivated channel %s (bot removed)", chat.id)
 
 
@@ -4651,35 +5184,22 @@ async def handle_channel_message(update: Update, context: ContextTypes.DEFAULT_T
             return
     else:
         logger.debug(f"Channel {chat.id} already registered and active")
+
+    if channel and not getattr(channel, "bot_can_post", False):
+        from bot_channel_access import verify_bot_can_post
+
+        if await verify_bot_can_post(context.bot, str(chat.id)):
+            db.set_channel_bot_can_post(str(chat.id), True)
+            channel = db.get_channel(str(chat.id))
     
     if not channel.is_active:
         return
     
-    # Check if message has a document/video
-    file = None
-    file_name = None
-    file_size = None
-    file_id = None
-    
-    if message.document:
-        file = message.document
-        file_name = file.file_name
-        file_size = file.file_size
-        file_id = file.file_id
-    elif message.video:
-        file = message.video
-        file_name = file.file_name or f"video_{message.message_id}.mp4"
-        file_size = file.file_size
-        file_id = file.file_id
-    elif message.audio:
-        file = message.audio
-        file_name = file.file_name or f"audio_{message.message_id}.mp3"
-        file_size = file.file_size
-        file_id = file.file_id
-    
-    if not file_name:
+    extracted = extract_message_file(message)
+    if not extracted:
         return
-    
+    file_name = extracted["file_name"]
+
     if not is_indexable_filename(file_name):
         logger.debug("Skipping subtitle/non-media file: %s", file_name)
         return
@@ -4690,6 +5210,31 @@ async def handle_channel_message(update: Update, context: ContextTypes.DEFAULT_T
     if db.file_exists(str(chat.id), message.message_id):
         return
 
+    from fingerprint import compute_content_fingerprint
+    from pipeline_router import (
+        schedule_pipeline_route,
+        try_complete_route_on_bucket_post,
+    )
+
+    fp = compute_content_fingerprint(
+        file_name,
+        extracted.get("file_size"),
+        file_unique_id=extracted.get("file_unique_id"),
+    )
+    if try_complete_route_on_bucket_post(
+        db,
+        channel_id=str(chat.id),
+        message_id=message.message_id,
+        fingerprint=fp,
+    ):
+        logger.info(
+            "Attached routed upload for %s in %s (msg %s)",
+            file_name,
+            chat.title,
+            message.message_id,
+        )
+        return
+
     chat_id_s = str(chat.id)
     chat_title = chat.title or "Unknown"
     msg_id = message.message_id
@@ -4697,62 +5242,71 @@ async def handle_channel_message(update: Update, context: ContextTypes.DEFAULT_T
     async def _ingest_file() -> None:
         import functools
 
-        meta = await asyncio.to_thread(
-            functools.partial(
-                build_index_metadata,
-                file_name,
-                parser=parser,
-                tmdb_helper=tmdb_helper,
-                db=db,
-            ),
-        )
-        parsed_name = meta["parsed_name"]
-        parsed = meta["parsed"]
-        if meta.get("tmdb_result"):
-            logger.info(
-                "TMDB validated: '%s' -> content_title_id=%s",
-                parsed.get("name"),
-                meta.get("content_title_id"),
-            )
-        elif meta.get("needs_tmdb_pick"):
-            logger.info(
-                "TMDB pick needed for '%s' (show/file: %s)",
-                file_name,
-                meta.get("search_name"),
-            )
-        try:
-            from tmdb_ingest_retry import schedule_tmdb_ingest_retry, should_queue_tmdb_retry
+        from bot_busy import wait_while_upload_active
 
-            upload = db.add_file_upload(
-                channel_id=chat_id_s,
-                message_id=msg_id,
-                file_name=file_name,
-                file_size=file_size,
-                file_id=file_id,
-                parsed_name=parsed_name,
-                auto_confirm=meta["auto_confirm"],
-                library_visible=meta.get("library_visible", False),
-                source_channel_id=source_channel_id,
-                content_title_id=meta.get("content_title_id"),
-                season_number=meta.get("season_number"),
-                episode_number=meta.get("episode_number"),
-                episode_title=meta.get("episode_title"),
+        await wait_while_upload_active(context.application)
+
+        try:
+            from bot_busy import upload_job_active
+
+            upload, info = await asyncio.to_thread(
+                functools.partial(
+                    index_channel_upload,
+                    db,
+                    parser,
+                    tmdb_helper,
+                    channel_id=chat_id_s,
+                    message_id=msg_id,
+                    source_channel_id=source_channel_id,
+                    extracted=extracted,
+                    refresh_job_on_link=not upload_job_active(
+                        context.application
+                    ),
+                ),
             )
-            if upload and should_queue_tmdb_retry(meta, tmdb_helper=tmdb_helper):
-                schedule_tmdb_ingest_retry(
-                    context.application,
-                    upload.id,
-                    db=db,
-                    parser=parser,
-                    tmdb_helper=tmdb_helper,
+            if info.get("status") == "duplicate_hold":
+                dup_of = getattr(upload, "duplicate_of_upload_id", None) if upload else None
+                logger.info(
+                    "Duplicate hold: %s (matches existing #%s)",
+                    file_name,
+                    dup_of or "?",
                 )
+                return
+            upload_id = upload.id if upload else None
+            meta = info.get("meta") or {}
+            if meta.get("tmdb_result"):
+                logger.info(
+                    "TMDB validated: %s -> content_title_id=%s",
+                    file_name,
+                    meta.get("content_title_id"),
+                )
+            elif meta.get("needs_tmdb_pick"):
+                logger.info("TMDB pick needed for %s", file_name)
+            if upload_id:
+                from tmdb_ingest_retry import schedule_tmdb_ingest_retry, should_queue_tmdb_retry
+
+                if should_queue_tmdb_retry(meta, tmdb_helper=tmdb_helper):
+                    schedule_tmdb_ingest_retry(
+                        context.application,
+                        upload_id,
+                        db=db,
+                        parser=parser,
+                        tmdb_helper=tmdb_helper,
+                    )
+                if meta.get("library_visible"):
+                    schedule_watch_publish(
+                        context, upload_id, library_visible=True
+                    )
+                route = info.get("route") or {}
+                if route.get("queued") and route.get("upload_id"):
+                    schedule_pipeline_route(
+                        context.application, int(route["upload_id"])
+                    )
             src_note = f" (source {source_channel_id})" if source_channel_id else ""
             logger.info(
-                "Indexed file: %s -> %s (confidence: %s, confirmed: %s) in %s%s",
+                "Indexed file: %s -> %s in %s%s",
                 file_name,
-                parsed_name,
-                parsed["confidence"],
-                meta["auto_confirm"],
+                meta.get("parsed_name"),
                 chat_title,
                 src_note,
             )
@@ -4773,11 +5327,17 @@ async def handle_forwarded_channel(update: Update, context: ContextTypes.DEFAULT
     """Register a channel when an admin forwards a post from it (admin only)."""
     if not update.message or not is_admin(update.effective_user.id):
         return
-    chat = update.message.forward_from_chat
-    if not chat and update.message.forward_origin:
-        origin = update.message.forward_origin
-        chat = getattr(origin, "chat", None) or getattr(origin, "sender_chat", None)
-    if not chat or chat.type not in (ChatType.CHANNEL, ChatType.SUPERGROUP, ChatType.GROUP):
+    chat = _forward_source_chat(update.message)
+    if not chat:
+        await update.message.reply_text(
+            "❌ Could not read which channel this forward came from.\n\n"
+            "Forward a post that still shows the <b>channel name</b> at the top "
+            "(not a hidden-user forward).\n"
+            "Or use <b>Register channel → Enter @username</b> if the channel is public.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+    if chat.type not in (ChatType.CHANNEL, ChatType.SUPERGROUP, ChatType.GROUP):
         return
     try:
         channel = register_chat_channel(chat, log_source="forwarded_message")
@@ -4798,19 +5358,65 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not update.message or not update.message.text:
         return
 
-    if bot_busy.is_busy(context.application):
-        await update.message.reply_text(
-            bot_busy.busy_message_html(context.application), parse_mode=ParseMode.HTML
+    user_id = update.effective_user.id if update.effective_user else 0
+    if bot_busy.is_busy(context.application) and is_admin(user_id):
+        # Admins: offer the menu instead of a dead-end while a heavy job runs.
+        # Upload planning (folder scan / job name) must keep working during ▶️ upload.
+        awaiting = any(
+            k.startswith("awaiting_") and context.user_data.get(k)
+            for k in context.user_data
         )
-        return
-    
-    user_id = update.effective_user.id
-    
+        upload_planning = bool(context.user_data.get("upload_wizard"))
+        if not awaiting and not upload_planning:
+            await send_main_menu(update, context, edit=False)
+            return
+
+    text = (update.message.text or "").strip()
+
     if await watch_features.handle_watch_text(update, context, user_id):
+        return
+
+    if await vault_features.handle_vault_search_text(update, context, text):
+        return
+
+    if await archive_browse.handle_archive_search_text(update, context, text):
+        return
+
+    if await upload_features.handle_upload_admin_text(update, context, text, user_id):
         return
 
     if context.user_data.pop("awaiting_list_name", None):
         await start_create_list_ui(update, context, update.message.text.strip())
+        return
+
+    if context.user_data.pop("awaiting_upload_csv", None):
+        if not is_admin(user_id):
+            await update.message.reply_text("❌ You don't have permission.")
+            return
+        text = update.message.text or ""
+        if update.message.document and update.message.document.file_name:
+            try:
+                f = await update.message.document.get_file()
+                raw = await f.download_as_bytearray()
+                text = raw.decode("utf-8", errors="replace")
+            except Exception as e:
+                await update.message.reply_text(f"❌ Could not read file: {e}")
+                return
+        wiz = context.user_data.pop("upload_wizard", {}) or {}
+        lane = wiz.get("lane")
+        ok, msg, job_id = await upload_features.import_csv_job(
+            text, user_id, lane=lane
+        )
+        markup = None
+        if ok and job_id:
+            markup = InlineKeyboardMarkup(
+                [[InlineKeyboardButton("Open job", callback_data=f"up_job:{job_id}")]]
+            )
+        await update.message.reply_text(
+            msg if ok else f"❌ {msg}",
+            parse_mode=ParseMode.HTML if ok else None,
+            reply_markup=markup,
+        )
         return
 
     if context.user_data.pop("awaiting_add_channel_username", None):
@@ -4853,11 +5459,30 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             await update.message.reply_text("❌ Send a non-empty title to search on TMDB.")
             return
 
-        status_msg = await update.message.reply_text(
-            f"⏳ <b>Searching TMDB for</b> <code>{escape(query_text)}</code>…",
-            parse_mode=ParseMode.HTML,
+        chat_id = update.message.chat_id
+        hdr_key = _bulk_tmdb_header_match_key(context, bulk_search_key)
+        header_id = context.user_data.get(_tmdb_header_msg_key(match_key=hdr_key))
+        searching = (
+            f"⏳ <b>Searching TMDB for</b> <code>{escape(query_text)}</code>…"
         )
-        anchor = MessageUiAnchor(status_msg)
+        if header_id:
+            await bot_edit_message(context, chat_id, header_id, searching, None)
+            anchor = HeaderEditAnchor(
+                context.bot, chat_id, header_id, update.effective_user
+            )
+        else:
+            status_msg = await update.message.reply_text(
+                searching, parse_mode=ParseMode.HTML
+            )
+            context.user_data[_tmdb_header_msg_key(match_key=hdr_key)] = (
+                status_msg.message_id
+            )
+            anchor = HeaderEditAnchor(
+                context.bot,
+                chat_id,
+                status_msg.message_id,
+                update.effective_user,
+            )
         _fire_interactive_job(
             context.application,
             f"TMDB search batch {query_text[:28]}",
@@ -4886,22 +5511,84 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             await update.message.reply_text("❌ File not found — open Pending again.")
             return
 
-        status_msg = await update.message.reply_text(
-            f"⏳ <b>Searching TMDB for</b> <code>{escape(query_text)}</code>…",
-            parse_mode=ParseMode.HTML,
+        chat_id = update.message.chat_id
+        fid = int(tmdb_search_file_id)
+        header_id = context.user_data.get(_tmdb_header_msg_key(file_id=fid))
+        searching = (
+            f"⏳ <b>Searching TMDB for</b> <code>{escape(query_text)}</code>…"
         )
-        anchor = MessageUiAnchor(status_msg)
+        if header_id:
+            await bot_edit_message(context, chat_id, header_id, searching, None)
+            anchor = HeaderEditAnchor(
+                context.bot, chat_id, header_id, update.effective_user
+            )
+        else:
+            status_msg = await update.message.reply_text(
+                searching, parse_mode=ParseMode.HTML
+            )
+            context.user_data[_tmdb_header_msg_key(file_id=fid)] = (
+                status_msg.message_id
+            )
+            anchor = HeaderEditAnchor(
+                context.bot,
+                chat_id,
+                status_msg.message_id,
+                update.effective_user,
+            )
         _fire_interactive_job(
             context.application,
             f"TMDB search file {tmdb_search_file_id}",
             lambda: _run_tmdb_pick_job(
                 anchor,
                 context,
-                int(tmdb_search_file_id),
+                fid,
                 file_name=upload.file_name,
                 parsed_name=upload.parsed_name,
                 search_query_override=query_text,
             ),
+        )
+        return
+
+    if context.user_data.pop("pending_strip_rule_add", False):
+        if not is_admin(user_id):
+            await update.message.reply_text("❌ You don't have permission.")
+            return
+        pattern = update.message.text.replace("\r", "").replace("\n", "")
+        if not pattern.strip():
+            await update.message.reply_text("❌ Prefix cannot be empty.")
+            return
+        from name_parser import invalidate_filename_strip_rules_cache
+
+        row = db.add_filename_strip_rule(pattern)
+        invalidate_filename_strip_rules_cache()
+        await update.message.reply_text(
+            f"✅ Prefix saved:\n<code>{escape(pattern)}</code>\n\n"
+            "Open <b>Library setup → Filename prefix rules</b> to review or test.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    if context.user_data.pop("pending_strip_rule_test", False):
+        if not is_admin(user_id):
+            await update.message.reply_text("❌ You don't have permission.")
+            return
+        sample = update.message.text.strip()
+        if not sample:
+            await update.message.reply_text("❌ Send a filename to test.")
+            return
+        from name_parser import apply_filename_strip_rules
+
+        context.user_data["strip_preview_sample"] = sample
+        stripped = apply_filename_strip_rules(sample)
+        parsed = parser.parse_name(sample)
+        title = parsed.get("show_name") or parsed.get("name") or "?"
+        await update.message.reply_text(
+            "🧪 <b>Filename preview</b>\n\n"
+            f"File: <code>{escape(sample[:200])}</code>\n"
+            f"After strip: <code>{escape(stripped[:200])}</code>\n"
+            f"Parsed title: <b>{escape(title)}</b>\n\n"
+            "<i>Library setup → Filename prefix rules for the full list.</i>",
+            parse_mode=ParseMode.HTML,
         )
         return
     
@@ -4947,12 +5634,12 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 n = _apply_custom_bulk(file_ids, custom_name, media_type=mt)
                 title_line = custom_name
                 note = ""
-            await _finish_tmdb_pick_success(
+            await _finish_pending_map_and_continue(
                 context,
-                update.effective_chat.id,
-                f"✅ <b>Batch saved ({n} files)</b>\n\nTitle: <b>{escape(title_line)}</b>{note}",
-                InlineKeyboardMarkup(
-                    [[InlineKeyboardButton("« Pending", callback_data="pending_menu")]]
+                chat_id=update.effective_chat.id,
+                success_text=(
+                    f"✅ <b>Batch saved ({n} files)</b>\n\n"
+                    f"Title: <b>{escape(title_line)}</b>{note}"
                 ),
                 match_key=match_key,
             )
@@ -5037,14 +5724,13 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                     elif upload and not match:
                         schedule_watch_publish(context, upload.id, library_visible=True)
                 if upload:
-                    await _finish_tmdb_pick_success(
+                    await _finish_pending_map_and_continue(
                         context,
-                        update.effective_chat.id,
-                        f"✅ <b>Title saved</b>\n\n"
-                        f"<code>{escape(upload.file_name)}</code>\n"
-                        f"Title: <b>{escape(upload.confirmed_name or custom_name)}</b>{note}",
-                        InlineKeyboardMarkup(
-                            [[InlineKeyboardButton("« Pending", callback_data="pending_menu")]]
+                        chat_id=update.effective_chat.id,
+                        success_text=(
+                            f"✅ <b>Title saved</b>\n\n"
+                            f"<code>{escape(upload.file_name)}</code>\n"
+                            f"Title: <b>{escape(upload.confirmed_name or custom_name)}</b>{note}"
                         ),
                         file_id=file_id,
                     )
@@ -5082,7 +5768,13 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
         if _is_stale_callback_error(error) or is_unchanged_message_error(error):
             logger.debug("Benign Telegram API response: %s", error)
         return
-    
+
+    from telegram.error import NetworkError, TimedOut
+
+    if isinstance(error, (TimedOut, NetworkError)):
+        logger.warning("Transient Telegram API error (update not lost): %s", error)
+        return
+
     # Log other errors
     logger.error(f"Exception while handling an update: {error}", exc_info=error)
 
@@ -5092,19 +5784,27 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if not query:
         return
-    if bot_busy.is_busy(context.application):
-        await flood_answer_callback(
-            query, bot_busy.busy_alert(context.application), show_alert=True
-        )
-        return
-    query_fresh = await safe_answer_callback(query)
-    
+
+    data = query.data or ""
+    # Upload start/stop answer in upload_features (alerts + queue feedback).
+    defer_answer = data.startswith("up_job_run:") or data.startswith("up_job_stop:")
+    query_fresh = True if defer_answer else await safe_answer_callback(query)
+
     if not query.data:
         return
-    
+
     data = query.data
     user_id = query.from_user.id
     
+    if await library_setup.handle_setup_callback(data, update, context, user_id):
+        return
+
+    if await vault_features.handle_vault_callback(data, update, context, user_id):
+        return
+
+    if await upload_features.handle_upload_callback(data, update, context, user_id):
+        return
+
     if await watch_features.handle_watch_callback(data, update, context, user_id):
         return
     
@@ -5146,6 +5846,100 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    elif data.startswith("tpml:"):
+        parts = data.split(":")
+        if len(parts) < 3:
+            await safe_answer_callback(query, "Invalid action", show_alert=True)
+            return
+        kind, ref_s = parts[1], parts[2]
+        if not is_admin(user_id):
+            await query.edit_message_text("❌ You don't have permission.")
+            return
+        await safe_answer_callback(query, "Loading more…")
+        if kind == "g":
+            gid = int(ref_s)
+            meta = context.user_data.get(_bulk_meta_key(gid), {})
+            q = (
+                meta.get("pick_query")
+                or meta.get("manual_search_query")
+                or meta.get("search_name")
+                or ""
+            )
+            if not q or not tmdb_helper.enabled:
+                await safe_answer_callback(query, "No search query", show_alert=True)
+                return
+            page = int(meta.get("pick_page") or 1) + 1
+            ft = meta.get("pick_filter") or "all"
+            pick = await _fetch_tmdb_pick_page(
+                q,
+                media_type=meta.get("media_type") or "tv",
+                parsed=meta.get("parsed"),
+                page=page,
+                filter_type=ft,
+            )
+            suggestions = list(context.user_data.get(_tmdb_sug_key_bulk(gid), []))
+            new_items = pick.get("items") or []
+            old_len = len(suggestions)
+            suggestions.extend(new_items)
+            context.user_data[_tmdb_sug_key_bulk(gid)] = suggestions
+            meta["suggestions"] = suggestions
+            meta["pick_page"] = page
+            meta["pick_has_more"] = bool(pick.get("has_more"))
+            context.user_data[_bulk_meta_key(gid)] = meta
+            if new_items:
+                await _send_tmdb_suggestion_cards(
+                    query,
+                    context,
+                    new_items,
+                    lambda i: f"tpb:{gid}:{i}",
+                    match_key=str(gid),
+                    start_index=old_len,
+                    clear_existing=False,
+                )
+        elif kind == "f":
+            file_id = int(ref_s)
+            meta = context.user_data.get(f"tmdb_meta_{file_id}", {})
+            q = (
+                meta.get("pick_query")
+                or meta.get("manual_search_query")
+                or meta.get("search_name")
+                or ""
+            )
+            if not q or not tmdb_helper.enabled:
+                await safe_answer_callback(query, "No search query", show_alert=True)
+                return
+            page = int(meta.get("pick_page") or 1) + 1
+            ft = meta.get("pick_filter") or "all"
+            pick = await _fetch_tmdb_pick_page(
+                q,
+                media_type=meta.get("media_type") or "movie",
+                parsed=meta.get("parsed"),
+                page=page,
+                filter_type=ft,
+            )
+            suggestions = list(context.user_data.get(_tmdb_sug_key(file_id), []))
+            new_items = pick.get("items") or []
+            old_len = len(suggestions)
+            suggestions.extend(new_items)
+            context.user_data[_tmdb_sug_key(file_id)] = suggestions
+            meta["suggestions"] = suggestions
+            meta["pick_page"] = page
+            meta["pick_has_more"] = bool(pick.get("has_more"))
+            context.user_data[f"tmdb_meta_{file_id}"] = meta
+            if new_items:
+                await _send_tmdb_suggestion_cards(
+                    query,
+                    context,
+                    new_items,
+                    lambda i: f"tmdb_pick:{file_id}:{i}",
+                    file_id=file_id,
+                    start_index=old_len,
+                    clear_existing=False,
+                )
+        else:
+            await safe_answer_callback(query, "Invalid action", show_alert=True)
+        return
+
     elif data.startswith("tmdb_pick:"):
         _, file_id_s, idx_s = data.split(":", 2)
         file_id, idx = int(file_id_s), int(idx_s)
@@ -5164,35 +5958,15 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 context, upload.id, library_visible=bool(selection.get("tmdb_id"))
             )
             context.user_data[f"tmdb_last_pick_{file_id}"] = selection
-            keyboard = []
-            pending = db.get_pending_confirmations(limit=500)
-            sib_ids = sibling_pending_ids(
-                pending,
-                parser=parser,
-                anchor_file_id=file_id,
-                anchor_parsed=meta.get("parsed"),
-                anchor_file_name=upload.file_name,
-            )
-            if sib_ids:
-                show = meta.get("search_name") or meta.get("local_name") or "series"
-                keyboard.append(
-                    [
-                InlineKeyboardButton(
-                            f"📦 Apply same TMDB to {len(sib_ids)} similar pending",
-                            callback_data=f"tmdb_apply_siblings:{file_id}",
-                        )
-                    ]
-                )
-            back_cb = context.user_data.get("remap_back_cb", "pending_menu")
-            back_label = context.user_data.get("remap_back_label", "« Pending")
-            keyboard.append([InlineKeyboardButton(back_label, callback_data=back_cb)])
-            await _finish_tmdb_pick_success(
+            await _finish_pending_map_and_continue(
                 context,
-                query.message.chat_id,
-                f"✅ <b>TMDB linked</b>\n\n"
-                f"<code>{escape(upload.file_name)}</code>\n"
-                f"Title: <b>{escape(upload.confirmed_name or '')}</b>",
-                InlineKeyboardMarkup(keyboard),
+                query=query,
+                chat_id=query.message.chat_id,
+                success_text=(
+                    f"✅ <b>TMDB linked</b>\n\n"
+                    f"<code>{escape(upload.file_name)}</code>\n"
+                    f"Title: <b>{escape(upload.confirmed_name or '')}</b>"
+                ),
                 file_id=file_id,
             )
         else:
@@ -5221,13 +5995,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             anchor_file_name=upload.file_name,
         )
         n = _apply_tmdb_bulk(sib_ids, selection)
-        await _finish_tmdb_pick_success(
+        await _finish_pending_map_and_continue(
             context,
-            query.message.chat_id,
-            f"✅ <b>Applied to {n} similar file(s)</b>\n\n"
-            f"Same TMDB: <b>{escape(selection.get('title') or '')}</b>",
-            InlineKeyboardMarkup(
-                [[InlineKeyboardButton("« Pending", callback_data="pending_menu")]]
+            query=query,
+            chat_id=query.message.chat_id,
+            success_text=(
+                f"✅ <b>Applied to {n} similar file(s)</b>\n\n"
+                f"Same TMDB: <b>{escape(selection.get('title') or '')}</b>"
             ),
             file_id=file_id,
         )
@@ -5297,7 +6071,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 match_key=str(meta_key),
             )
             return
-        remaining = len(db.get_pending_confirmations(limit=500))
         title = escape(selection.get("title") or "")
         note = ""
         if n > 0 and selection.get("tmdb_id") and tmdb_helper._last_api_error:
@@ -5305,14 +6078,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "\n<i>TMDB network glitch — files linked; metadata may be minimal. "
                 "Retry from Browse if needed.</i>"
             )
-        await _finish_tmdb_pick_success(
+        await _finish_pending_map_and_continue(
             context,
-            query.message.chat_id,
-            f"✅ <b>Batch linked ({n} files)</b>\n\n"
-            f"TMDB: <b>{title}</b>\n"
-            f"<i>{remaining} file(s) still pending.</i>{note}",
-            InlineKeyboardMarkup(
-                [[InlineKeyboardButton("« Pending", callback_data="pending_menu")]]
+            query=query,
+            chat_id=query.message.chat_id,
+            success_text=(
+                f"✅ <b>Batch linked ({n} files)</b>\n\nTMDB: <b>{title}</b>{note}"
             ),
             match_key=str(meta_key),
         )
@@ -5330,13 +6101,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         show_name = group.get("show_name") or "Series"
         mt = group.get("media_type") or "tv"
         n = _apply_parsed_bulk(group["file_ids"], show_name, media_type=mt)
-        await _finish_tmdb_pick_success(
+        await _finish_pending_map_and_continue(
             context,
-            query.message.chat_id,
-            f"✅ <b>Saved {n} file(s)</b> as <b>{escape(show_name)}</b>\n\n"
-            "<i>Not linked to TMDB — won’t appear in library browse until TMDB is set.</i>",
-            InlineKeyboardMarkup(
-                [[InlineKeyboardButton("« Pending", callback_data="pending_menu")]]
+            query=query,
+            chat_id=query.message.chat_id,
+            success_text=(
+                f"✅ <b>Saved {n} file(s)</b> as <b>{escape(show_name)}</b>\n\n"
+                "<i>Not linked to TMDB — won’t appear in library browse until TMDB is set.</i>"
             ),
             match_key=str(group.get("group_id", ref)),
         )
@@ -5355,6 +6126,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await safe_edit_message(query, "Batch not found — open Pending again.")
             return
         context.user_data["bulk_tmdb_search_match_key"] = match_key
+        _remember_tmdb_pick_header(
+            query,
+            context,
+            match_key=_bulk_tmdb_header_match_key(context, match_key),
+        )
         n = len(group["file_ids"])
         show = escape(group.get("show_name") or "Batch")
         preview = _format_batch_files_preview(group)
@@ -5382,6 +6158,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await safe_edit_message(query, "❌ File not found — open Pending again.")
             return
         context.user_data["pending_tmdb_search_file_id"] = file_id
+        _remember_tmdb_pick_header(query, context, file_id=file_id)
         fname = escape(_truncate_for_telegram(upload.file_name, 200))
         await safe_edit_message(
             query,
@@ -5404,16 +6181,17 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await safe_edit_message(query, "Batch not found — open Pending again.")
             return
         n = db.defer_pending_files(group["file_ids"])
-        _refresh_pending_groups(context)
         label = escape(group.get("show_name") or "Batch")
-        await safe_edit_message(
-            query,
-            f"⏭ <b>Skipped for now</b> — <b>{n}</b> file(s)\n\n"
-            f"<b>{label}</b> moved to the end of Pending.\n"
-            "Map other titles first; this batch stays in the queue.",
-            reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("« Pending", callback_data="pending_menu")]]
+        await safe_answer_callback(query, "Skipped")
+        await _finish_pending_map_and_continue(
+            context,
+            query=query,
+            chat_id=query.message.chat_id,
+            success_text=(
+                f"⏭ <b>Skipped for now</b> — <b>{n}</b> file(s)\n\n"
+                f"<b>{label}</b> moved to the end of Pending."
             ),
+            match_key=str(ref),
         )
         return
 
@@ -5426,14 +6204,16 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not n:
             await safe_edit_message(query, "❌ File not found or already confirmed.")
             return
-        _refresh_pending_groups(context)
-        await safe_edit_message(
-            query,
-            f"⏭ <b>Skipped for now</b> (file #{file_id})\n\n"
-            "Moved to the end of Pending — map other titles first.",
-            reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("« Pending", callback_data="pending_menu")]]
+        await safe_answer_callback(query, "Skipped")
+        await _finish_pending_map_and_continue(
+            context,
+            query=query,
+            chat_id=query.message.chat_id,
+            success_text=(
+                f"⏭ <b>Skipped for now</b> (file #{file_id})\n\n"
+                "Moved to the end of Pending."
             ),
+            file_id=file_id,
         )
         return
 
@@ -5508,14 +6288,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 library_visible=False,
             )
         if upload:
-            await _finish_tmdb_pick_success(
+            await _finish_pending_map_and_continue(
                 context,
-                query.message.chat_id,
-                f"✅ <b>Title saved</b>\n\n"
-                f"<code>{escape(upload.file_name)}</code>\n"
-                f"<b>{escape(upload.confirmed_name or '')}</b>",
-                InlineKeyboardMarkup(
-                    [[InlineKeyboardButton("« Pending", callback_data="pending_menu")]]
+                query=query,
+                chat_id=query.message.chat_id,
+                success_text=(
+                    f"✅ <b>Title saved</b>\n\n"
+                    f"<code>{escape(upload.file_name)}</code>\n"
+                    f"<b>{escape(upload.confirmed_name or '')}</b>"
                 ),
                 file_id=file_id,
             )
@@ -5557,15 +6337,15 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         upload = _apply_skip_catalog_file(file_id, library_only=False)
         if upload:
-            await _finish_tmdb_pick_success(
+            await _finish_pending_map_and_continue(
                 context,
-                query.message.chat_id,
-                f"✅ <b>Skipped watch catalog</b>\n\n"
-                f"<code>{escape(upload.file_name)}</code>\n"
-                f"Grouped as: <b>{escape(upload.confirmed_name or '?')}</b>\n\n"
-                "<i>Indexed only — not in library browse or watch channel.</i>",
-                InlineKeyboardMarkup(
-                    [[InlineKeyboardButton("« Pending", callback_data="pending_menu")]]
+                query=query,
+                chat_id=query.message.chat_id,
+                success_text=(
+                    f"✅ <b>Skipped watch catalog</b>\n\n"
+                    f"<code>{escape(upload.file_name)}</code>\n"
+                    f"Grouped as: <b>{escape(upload.confirmed_name or '?')}</b>\n\n"
+                    "<i>Indexed only — not in library browse or watch channel.</i>"
                 ),
                 file_id=file_id,
             )
@@ -5584,13 +6364,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await safe_edit_message(query, "Batch not found — open Pending again.")
             return
         n = _apply_skip_catalog_bulk(group["file_ids"], library_only=False)
-        await _finish_tmdb_pick_success(
+        await _finish_pending_map_and_continue(
             context,
-            query.message.chat_id,
-            f"✅ <b>Skipped watch catalog ({n} files)</b>\n\n"
-            "<i>Indexed only — not in library browse or watch channel.</i>",
-            InlineKeyboardMarkup(
-                [[InlineKeyboardButton("« Pending", callback_data="pending_menu")]]
+            query=query,
+            chat_id=query.message.chat_id,
+            success_text=(
+                f"✅ <b>Skipped watch catalog ({n} files)</b>\n\n"
+                "<i>Indexed only — not in library browse or watch channel.</i>"
             ),
             match_key=str(group.get("group_id", ref)),
         )
@@ -5910,6 +6690,15 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer()
         await run_retry_all_pending_tmdb(update, context, edit=True)
 
+    elif data == "pending_retry_stop":
+        if not is_admin(user_id):
+            await query.answer("❌ Admin only.", show_alert=True)
+            return
+        if request_tmdb_bulk_retry_stop(context.application):
+            await query.answer("Stopping after current file…")
+        else:
+            await query.answer("No TMDB retry is running.", show_alert=True)
+
     elif data.startswith("pending_page:"):
         if not is_admin(user_id):
             await query.answer("❌ Admin only.", show_alert=True)
@@ -5990,14 +6779,21 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parts = data.split(":")
         page = int(parts[1])
         filt = parts[2] if len(parts) > 2 else "all"
-        await send_tracking_menu(update, context, page=page, filter_kind=filt, edit=True)
+        comp = parts[3] if len(parts) > 3 else context.user_data.get("tracking_completion", "all")
+        await send_tracking_menu(
+            update, context, page=page, filter_kind=filt, completion=comp, edit=True
+        )
 
     elif data.startswith("tracking_filter:"):
         if not is_admin(user_id):
             await query.answer("❌ Admin only.", show_alert=True)
             return
-        filt = data.split(":", 1)[1]
-        await send_tracking_menu(update, context, page=0, filter_kind=filt, edit=True)
+        parts = data.split(":")
+        filt = parts[1] if len(parts) > 1 else "all"
+        comp = parts[2] if len(parts) > 2 else "all"
+        await send_tracking_menu(
+            update, context, page=0, filter_kind=filt, completion=comp, edit=True
+        )
 
     elif data.startswith("tracking_tv:"):
         if not is_admin(user_id):
@@ -6033,7 +6829,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not is_admin(user_id):
             await query.answer("❌ Admin only.", show_alert=True)
             return
-        await send_set_ingest_channel_menu(update, context, edit=True)
+        back = "setup_hub" if context.user_data.get("setup_return") else "backfill_menu"
+        await send_set_ingest_channel_menu(
+            update, context, edit=True, back_callback=back
+        )
 
     elif data == "backfill_start_menu":
         if not is_admin(user_id):
@@ -6100,6 +6899,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context,
             channel_id,
             dry_run=(mode == "dry"),
+            skip_duplicates=(mode == "live_skip"),
             edit=True,
         )
 
@@ -6111,7 +6911,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         channel = db.set_ingest_channel(channel_id)
         if channel:
             await query.answer("✅ Ingest channel saved")
-            await send_backfill_guide(update, context, edit=True)
+            if context.user_data.get("setup_return") == "setup_hub":
+                await library_setup.send_library_setup_hub(update, context, edit=True)
+            else:
+                await send_backfill_guide(update, context, edit=True)
         else:
             await query.answer("❌ Channel not found", show_alert=True)
 
@@ -6230,11 +7033,16 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             backfill_count=backfill_n,
             historical_ingested_at=getattr(channel, "historical_ingested_at", None),
         )
+        from content_lanes import LANE_LABELS, normalize_lane
+
+        lane = normalize_lane(getattr(channel, "content_lane", None))
         text = (
             f"<b>{escape(channel.channel_title or 'Unknown')}</b>\n\n"
             f"Username: <code>{escape(username)}</code>\n"
             f"ID: <code>{escape(channel.channel_id)}</code>\n"
             f"Status: {status}\n"
+            f"Staging default: <b>{escape(LANE_LABELS.get(lane, lane))}</b> "
+            f"<i>(optional — only if channel is single-type uploads)</i>\n"
             f"Indexed files (display count): <b>{uploads}</b>\n\n"
             + "\n".join(status_block)
         )
@@ -6247,15 +7055,15 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ],
         ]
         if is_admin(user_id):
+            keyboard.append(
+                [
+                    InlineKeyboardButton(
+                        "⚙️ Staging default",
+                        callback_data=f"setup_lane_ch:{channel_id}",
+                    )
+                ]
+            )
             if not getattr(channel, "is_ingest_channel", False):
-                keyboard.append(
-                    [
-                        InlineKeyboardButton(
-                            "📥 Set as ingest channel",
-                            callback_data=f"set_ingest_channel:{channel_id}",
-                        )
-                    ]
-                )
                 if db.get_ingest_channel():
                     keyboard.append(
                         [
@@ -6412,6 +7220,18 @@ def _acquire_single_instance_lock() -> bool:
 async def post_init(application: Application) -> None:
     """Post-initialization hook to clear pending updates and check for conflicts"""
     await start_job_queue(application)
+    from telethon_gateway import start_telethon_gateway
+
+    await start_telethon_gateway()
+    from channel_member_watch import start_member_watch_worker
+
+    start_member_watch_worker(application)
+    cleared = db.clear_pending_tmdb_retry_schedules()
+    if cleared:
+        logger.info("Cleared %s stale TMDB retry schedule(s) on startup", cleared)
+    dismissed = db.auto_confirm_non_tmdb_pending()
+    if dismissed:
+        logger.info("Auto-confirmed %s image/GIF pending upload(s)", dismissed)
     bot = application.bot
     try:
         # First, delete any webhook
@@ -6432,6 +7252,14 @@ async def post_init(application: Application) -> None:
         logger.warning("⚠️ If you see 409 Conflict errors, make sure no other bot instance is running")
 
 
+async def post_shutdown(application: Application) -> None:
+    from channel_member_watch import stop_member_watch_worker
+    from telethon_gateway import stop_telethon_gateway
+
+    await stop_member_watch_worker()
+    await stop_telethon_gateway()
+
+
 def main():
     """Main function to run the bot"""
     if not _acquire_single_instance_lock():
@@ -6449,6 +7277,7 @@ def main():
         Application.builder()
         .token(Config.BOT_TOKEN)
         .post_init(post_init)
+        .post_shutdown(post_shutdown)
         .concurrent_updates(8)
         .build()
     )
@@ -6463,6 +7292,7 @@ def main():
     application.add_handler(CommandHandler("watch", watch_cmd))
     application.add_handler(CommandHandler("favorites", favorites_cmd))
     application.add_handler(CommandHandler("watchlist", watchlist_cmd))
+    application.add_handler(CommandHandler("portal", portal_cmd))
     application.add_handler(CommandHandler("request", request_cmd))
     application.add_handler(CommandHandler("help", watch_help_cmd))
     application.add_handler(CommandHandler("channels", channels))

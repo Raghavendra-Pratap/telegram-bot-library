@@ -10,6 +10,15 @@ _INDEX_ROOT_DIR="$(cd "${_INDEX_BOT_DIR}/.." && pwd)"
 cd "${_INDEX_BOT_DIR}"
 
 ensure_index_bot_dependencies() {
+  local req_file="${_INDEX_BOT_DIR}/requirements-all.txt"
+  if [[ ! -f "${req_file}" ]]; then
+    if [[ -f "${_INDEX_ROOT_DIR}/requirements/bot-index.txt" ]]; then
+      req_file="${_INDEX_ROOT_DIR}/requirements/bot-index.txt"
+    else
+      req_file="${_INDEX_BOT_DIR}/requirements.txt"
+    fi
+  fi
+
   if [[ -x "${_INDEX_ROOT_DIR}/scripts/setup_env.sh" ]]; then
     if [[ ! -d "${_INDEX_ROOT_DIR}/.venv" ]]; then
       echo "Creating shared virtualenv at ${_INDEX_ROOT_DIR}/.venv ..."
@@ -18,9 +27,10 @@ ensure_index_bot_dependencies() {
     # shellcheck source=/dev/null
     source "${_INDEX_ROOT_DIR}/.venv/bin/activate"
 
-    if ! python -c "import telegram, sqlalchemy, telethon, dotenv" 2>/dev/null; then
-      echo "Installing Index_bot dependencies (scripts/install_deps.sh index)..."
-      "${_INDEX_ROOT_DIR}/scripts/install_deps.sh" index
+    if ! python -c "import telegram, sqlalchemy, telethon, dotenv, uvicorn, fastapi, tmdbv3api, regex, psycopg" 2>/dev/null; then
+      echo "Installing Index_bot dependencies from ${req_file} ..."
+      pip install --upgrade pip wheel
+      pip install -r "${req_file}"
     fi
     return 0
   fi
@@ -33,13 +43,9 @@ ensure_index_bot_dependencies() {
   # shellcheck source=/dev/null
   source "${_INDEX_BOT_DIR}/venv/bin/activate"
 
-  if ! python -c "import telegram, sqlalchemy, telethon, dotenv" 2>/dev/null; then
-    echo "Installing dependencies from requirements.txt..."
+  if ! python -c "import telegram, sqlalchemy, telethon, dotenv, uvicorn, fastapi, tmdbv3api, regex, psycopg" 2>/dev/null; then
+    echo "Installing dependencies from ${req_file} ..."
     pip install --upgrade pip wheel
-    if [[ -f "${_INDEX_ROOT_DIR}/requirements/bot-index.txt" ]]; then
-      pip install -r "${_INDEX_ROOT_DIR}/requirements/bot-index.txt"
-    else
-      pip install -r requirements.txt
-    fi
+    pip install -r "${req_file}"
   fi
 }

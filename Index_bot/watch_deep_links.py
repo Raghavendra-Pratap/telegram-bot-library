@@ -27,6 +27,19 @@ def favorite_start_payload(content_title_id: int) -> str:
     return f"fav_{int(content_title_id)}"
 
 
+def file_start_payload(upload_id: int) -> str:
+    return f"file_{int(upload_id)}"
+
+
+def parse_file_start_payload(payload: str) -> int | None:
+    if not payload.startswith("file_"):
+        return None
+    try:
+        return int(payload.split("_", 1)[1])
+    except (ValueError, IndexError):
+        return None
+
+
 def parse_watch_start_payload(payload: str) -> tuple[int, int | None] | None:
     if not payload.startswith("watch_"):
         return None

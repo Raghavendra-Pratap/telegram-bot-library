@@ -8,6 +8,7 @@ from typing import Any
 
 from name_parser import (
     fix_bypass_character_substitutions,
+    strip_clipmate_movie_prefix,
     strip_leading_index_parts,
     strip_leading_sequence_prefix,
 )
@@ -25,7 +26,9 @@ def show_group_key(parsed: dict | None, file_name: str) -> str | None:
         re.sub(
             r"\.[^.]+$",
             "",
-            strip_leading_sequence_prefix(file_name or ""),
+            strip_clipmate_movie_prefix(
+                strip_leading_sequence_prefix(file_name or "")
+            ),
             flags=re.I,
         )
     )
