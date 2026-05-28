@@ -15,9 +15,9 @@ ensure_index_bot_dependencies() {
   local db_url="${DATABASE_URL:-}"
   if [[ -z "${db_url}" && -f "${_INDEX_BOT_DIR}/.env" ]]; then
     if command -v rg >/dev/null 2>&1; then
-      db_url="$(rg '^DATABASE_URL=' "${_INDEX_BOT_DIR}/.env" -n --no-heading 2>/dev/null | sed 's/^[0-9]*:DATABASE_URL=//')"
+      db_url="$(rg '^DATABASE_URL=' "${_INDEX_BOT_DIR}/.env" -n --no-heading 2>/dev/null | sed 's/^[0-9]*:DATABASE_URL=//' || true)"
     else
-      db_url="$(grep -E '^DATABASE_URL=' "${_INDEX_BOT_DIR}/.env" 2>/dev/null | sed 's/^DATABASE_URL=//')"
+      db_url="$(grep -E '^DATABASE_URL=' "${_INDEX_BOT_DIR}/.env" 2>/dev/null | sed 's/^DATABASE_URL=//' || true)"
     fi
   fi
   if [[ "${db_url,,}" == *postgres* ]]; then
