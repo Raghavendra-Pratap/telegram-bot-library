@@ -31,17 +31,38 @@ from config import Config
 from database import Base
 
 
-def _prepare_postgres_schema(dst: Engine) -> None:
-    """Adjust integer width for known large-value columns before copy."""
+def _sqlite_col_abs_max(src: Engine, table_name: str, col_name: str) -> int:
+    """Return max(abs(value)) for one SQLite column; non-numeric/empty => 0."""
+    q = text(
+        f'SELECT MAX(ABS(CAST("{col_name}" AS INTEGER))) AS m '
+        f'FROM "{table_name}" WHERE "{col_name}" IS NOT NULL'
+    )
+    with src.connect() as conn:
+        v = conn.execute(q).scalar()
+    try:
+        return int(v or 0)
+    except Exception:
+        return 0
+
+
+def _prepare_postgres_schema(src: Engine, dst: Engine) -> None:
+    """Widen Postgres int columns to BIGINT when SQLite data exceeds int32."""
     if dst.dialect.name != "postgresql":
         return
-    widen: dict[str, tuple[str, ...]] = {
-        "file_uploads": ("file_size", "message_id", "watch_message_id"),
-        "upload_job_items": ("file_size", "telegram_message_id"),
-    }
+    INT32_MAX = 2_147_483_647
+    insp = inspect(dst)
+    tables = set(insp.get_table_names())
     with dst.begin() as conn:
-        for table, cols in widen.items():
-            for col in cols:
+        for table in Base.metadata.sorted_tables:
+            tname = table.name
+            if tname not in tables:
+                continue
+            for col in table.columns:
+                if str(col.type).upper() != "INTEGER":
+                    continue
+                abs_max = _sqlite_col_abs_max(src, tname, col.name)
+                if abs_max <= INT32_MAX:
+                    continue
                 dtype = conn.execute(
                     text(
                         """
@@ -52,12 +73,16 @@ def _prepare_postgres_schema(dst: Engine) -> None:
                           AND column_name = :column_name
                         """
                     ),
-                    {"table_name": table, "column_name": col},
+                    {"table_name": tname, "column_name": col.name},
                 ).scalar()
                 if dtype in ("integer", "smallint"):
                     conn.execute(
-                        text(f"ALTER TABLE public.{table} ALTER COLUMN {col} TYPE BIGINT")
+                        text(
+                            f'ALTER TABLE public."{tname}" '
+                            f'ALTER COLUMN "{col.name}" TYPE BIGINT'
+                        )
                     )
+                    print(f"  widened {tname}.{col.name} to BIGINT (abs_max={abs_max})")
 
 
 def _sqlite_url() -> str:
@@ -80,7 +105,7 @@ def _pg_url() -> str:
 
 def _copy_tables(src: Engine, dst: Engine) -> None:
     Base.metadata.create_all(dst)
-    _prepare_postgres_schema(dst)
+    _prepare_postgres_schema(src, dst)
     insp_dst = inspect(dst)
     existing = set(insp_dst.get_table_names())
 
