@@ -1,0 +1,4 @@
+sequence,module,lesson_title,filename,local_path,file_size,decision,job_name,course_title,content_lane
+1,01 Introduction,Welcome to the course,01 - Welcome.mp4,/full/path/to/01 - Welcome.mp4,,upload,Python Mastery,Python Mastery,course
+2,01 Introduction,Environment setup,02 - Setup.mp4,/full/path/to/02 - Setup.mp4,,upload,,,
+3,02 Basics,Variables and types,03 - Variables.mp4,,,upload,,,

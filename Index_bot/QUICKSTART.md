@@ -1,78 +1,46 @@
-# Quick Start Guide
+# Quick Start
 
-## 1. Get Your Bot Token
+Minimal path to a running bot. For full detail see [README.md](./README.md) and [HOW_TO_RUN.md](./HOW_TO_RUN.md).
 
-1. Open Telegram and search for [@BotFather](https://t.me/BotFather)
-2. Send `/newbot` and follow the instructions
-3. Copy your bot token
+## 1. Credentials
 
-## 2. Get Your Admin User ID
+1. [@BotFather](https://t.me/BotFather) → `/newbot` → copy **BOT_TOKEN**
+2. [@userinfobot](https://t.me/userinfobot) → copy your numeric **user ID**
 
-1. Open Telegram and search for [@userinfobot](https://t.me/userinfobot)
-2. Send `/start` to get your user ID
-3. Copy your user ID (it's a number)
-
-## 3. Setup Environment
-
-1. Copy `.env.example` to `.env`:
-   ```bash
-   cp .env.example .env
-   ```
-
-2. Edit `.env` and add your credentials:
-   ```
-   BOT_TOKEN=your_bot_token_here
-   ADMIN_USER_IDS=your_user_id_here
-   ```
-
-## 4. Install Dependencies
+## 2. Config
 
 ```bash
-pip install -r requirements.txt
+cd Index_bot
+cp .env.example .env
+# Edit: BOT_TOKEN, ADMIN_USER_IDS
 ```
 
-## 5. Verify Setup
+## 3. Install & run
 
 ```bash
-python setup.py
+./run_all.sh
 ```
 
-## 6. Add Bot to Channels
+Or bot only: `./run_bot.sh`
 
-1. Go to your Telegram channel
-2. Open channel settings → Administrators
-3. Add your bot as an administrator
-4. Give it **read messages** permission (minimum required)
+## 4. Telegram
 
-## 7. Start the Bot
+- Add bot as **admin** to channels you want to index
+- Message the bot: `/start`, `/menu`
+- Optional portal: `/portal` (set `PORTAL_PUBLIC_URL` in `.env` first)
+
+## 5. Optional next steps
+
+| Goal | Doc |
+|------|-----|
+| Termux phone server | [TERMUX_SETUP.md](./TERMUX_SETUP.md) |
+| Upload courses in bulk | [UPLOAD_PIPELINE.md](./UPLOAD_PIPELINE.md) |
+| Mac uploads + bot on phone | [DEPLOYMENT.md](./DEPLOYMENT.md) |
+| Portal API | [API_DOCS.md](./API_DOCS.md) |
+| Old channel history | [HOW_TO_RUN.md](./HOW_TO_RUN.md) → Historical ingest |
+
+## Verify
 
 ```bash
-python bot.py
+python check_readiness.py
 ```
-
-## 8. Add Channels to Monitor
-
-Once the bot is running, send it a message:
-```
-/add_channel @your_channel_username
-```
-
-## 9. Import old uploads (optional)
-
-Bots cannot read channel history. Use **Telethon** to forward old posts into an **ingest** channel (bot must be admin there):
-
-```bash
-source venv/bin/activate
-python forward_ingest.py @source_channel @ingest_channel
-```
-
-See `HOW_TO_RUN.md` → *Historical ingest*. In Telegram, `/backfill` shows a short summary for admins.
-
-## Testing the Name Parser
-
-You can test the name parser with:
-```bash
-python test_parser.py
-```
-
-This will show how the parser extracts movie/series names from various file name formats.

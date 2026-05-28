@@ -22,6 +22,7 @@ from tmdb_helper import (
     tmdb_web_url,
 )
 from watch_catalog import (
+    catalog_queue_total,
     publish_catalog_all,
     season_from_callback,
     upgrade_all_catalog_keyboards,
@@ -130,7 +131,7 @@ async def _send_tmdb_suggestion_cards(
         if url:
             sent = await flood_reply_photo(
                 message,
-                url,
+                photo=url,
                 caption=caption,
                 parse_mode=ParseMode.HTML,
                 reply_markup=keyboard,
@@ -328,7 +329,11 @@ def _active_pick_message_ids(context: ContextTypes.DEFAULT_TYPE) -> set[int]:
 
 
 async def send_user_main_menu(
-    update: Update, context: ContextTypes.DEFAULT_TYPE, *, edit: bool = False
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    edit: bool = False,
+    prefix: str = "",
 ) -> None:
     """Home menu for non-admin users — personal lists only, no indexer admin tools."""
     query = update.callback_query
@@ -350,41 +355,148 @@ async def send_user_main_menu(
             n_wl += len(db.get_watchlist_items(user.id, wl.id, limit=500))
     n_req = len(db.get_user_upload_requests(user.id, limit=100)) if user else 0
     watch_ch = db.get_watch_channel()
-    lines = [
-        "<b>📚 My library</b>",
-        "",
-        "Browse what is available, manage your lists, and request titles "
-        "that are not uploaded yet.",
-        "",
-        f"⭐ Favorites: <b>{n_fav}</b> · 📋 Watchlist: <b>{n_wl}</b> · "
-        f"📨 Requests: <b>{n_req}</b>",
-    ]
+    lines = []
+    if prefix:
+        lines.extend([prefix, ""])
+    lines.extend(
+        [
+            "<b>📚 My library</b>",
+            "",
+            "Browse what is available, manage your lists, and request titles "
+            "that are not uploaded yet.",
+            "",
+            f"⭐ Favorites: <b>{n_fav}</b> · 📋 Watchlist: <b>{n_wl}</b> · "
+            f"📨 Requests: <b>{n_req}</b>",
+        ]
+    )
     if watch_ch:
         link = _watch_channel_link(watch_ch)
         label = escape(watch_ch.channel_title or watch_ch.channel_username or "channel")
         lines.append(f"\n📺 Watch channel: <b>{label}</b>")
         if link:
             lines.append(f'<a href="{escape(link)}">Open channel</a>')
+    n_archive = db.count_public_archive_files()
     keyboard = [
         [
             InlineKeyboardButton("🔍 Search", callback_data="search_menu"),
             InlineKeyboardButton("📖 Browse", callback_data="library_browse"),
         ],
         [InlineKeyboardButton("📚 Full library", callback_data="library_all")],
-        [
-            InlineKeyboardButton("⭐ Favorites", callback_data="watch_favorites"),
-            InlineKeyboardButton("📋 Watchlist", callback_data="watch_watchlists"),
-        ],
-        [
-            InlineKeyboardButton("📨 My requests", callback_data="watch_my_requests"),
-            InlineKeyboardButton("➕ Request title", callback_data="watch_req_start"),
-        ],
-        [InlineKeyboardButton("➕ Add to watchlist", callback_data="watch_wl_add_start")],
     ]
+    if n_archive > 0:
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    f"📦 Documents ({n_archive})", callback_data="watch_archive:0"
+                )
+            ]
+        )
+    keyboard.extend(
+        [
+            [
+                InlineKeyboardButton("⭐ Favorites", callback_data="watch_favorites"),
+                InlineKeyboardButton("📋 Watchlist", callback_data="watch_watchlists"),
+            ],
+            [
+                InlineKeyboardButton("📨 My requests", callback_data="watch_my_requests"),
+                InlineKeyboardButton("➕ Request title", callback_data="watch_req_start"),
+            ],
+            [InlineKeyboardButton("➕ Add to watchlist", callback_data="watch_wl_add_start")],
+        ]
+    )
     if watch_ch:
         keyboard.insert(2, [InlineKeyboardButton("📺 Watch channel", callback_data="watch_hub")])
     keyboard.append([InlineKeyboardButton("ℹ️ Help", callback_data="watch_help")])
     await _edit_or_reply(target, "\n".join(lines), InlineKeyboardMarkup(keyboard), edit=edit)
+
+
+_META_GAPS_PAGE = 12
+_META_GAP_ISSUES = frozenset({"all", "no_tmdb", "no_poster", "no_both"})
+
+
+async def send_metadata_gaps_menu(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    edit: bool = False,
+    issue: str = "all",
+    page: int = 0,
+) -> None:
+    if not update.effective_user or not Config.is_admin(update.effective_user.id):
+        return
+    issue = issue if issue in _META_GAP_ISSUES else "all"
+    page = max(0, int(page))
+    summary = db.count_metadata_gap_summary()
+    items, total = db.list_library_titles_missing_metadata(
+        issue=issue,
+        limit=_META_GAPS_PAGE,
+        offset=page * _META_GAPS_PAGE,
+    )
+    pages = max(1, (total + _META_GAPS_PAGE - 1) // _META_GAPS_PAGE) if total else 1
+
+    lines = [
+        "<b>📋 Metadata gaps</b>",
+        "",
+        f"Any: <b>{summary['missing_any']}</b> · "
+        f"No TMDB id: <b>{summary['no_tmdb']}</b> · "
+        f"No poster: <b>{summary['no_poster']}</b>",
+        "",
+    ]
+    portal = (Config.PORTAL_PUBLIC_URL or "").strip().rstrip("/")
+    if portal:
+        lines.append(f'<a href="{escape(portal)}">Full list in admin portal</a>')
+        lines.append("")
+
+    if not items:
+        lines.append("<i>No titles for this filter.</i>")
+    else:
+        start = page * _META_GAPS_PAGE + 1
+        for i, item in enumerate(items, start=start):
+            flags = []
+            if "no_tmdb" in item.get("issues", []):
+                flags.append("no TMDB")
+            if "no_poster" in item.get("issues", []):
+                flags.append("no poster")
+            flag_s = f" ({', '.join(flags)})" if flags else ""
+            lines.append(
+                f"{i}. {escape(item['title'])} · "
+                f"{escape(item.get('media_type') or '?')}{flag_s}"
+            )
+        lines.append("")
+        lines.append(f"Page <b>{page + 1}</b> / <b>{pages}</b> · <b>{total}</b> titles")
+
+    keyboard: list[list[InlineKeyboardButton]] = [
+        [
+            InlineKeyboardButton("Any", callback_data="watch_meta_gaps:all:0"),
+            InlineKeyboardButton("No TMDB", callback_data="watch_meta_gaps:no_tmdb:0"),
+        ],
+        [
+            InlineKeyboardButton("No poster", callback_data="watch_meta_gaps:no_poster:0"),
+            InlineKeyboardButton("Both", callback_data="watch_meta_gaps:no_both:0"),
+        ],
+    ]
+    nav: list[InlineKeyboardButton] = []
+    if page > 0:
+        nav.append(
+            InlineKeyboardButton(
+                "◀ Prev", callback_data=f"watch_meta_gaps:{issue}:{page - 1}"
+            )
+        )
+    if page + 1 < pages:
+        nav.append(
+            InlineKeyboardButton(
+                "Next ▶", callback_data=f"watch_meta_gaps:{issue}:{page + 1}"
+            )
+        )
+    if nav:
+        keyboard.append(nav)
+    keyboard.append([InlineKeyboardButton("« Watch hub", callback_data="watch_hub")])
+
+    query = update.callback_query
+    target = query if edit and query else update
+    await _edit_or_reply(
+        target, "\n".join(lines), InlineKeyboardMarkup(keyboard), edit=edit
+    )
 
 
 async def send_watch_hub_menu(
@@ -431,12 +543,13 @@ async def send_watch_hub_menu(
                 "<b>Admin buttons</b>",
                 "• <b>Publish new cards</b> — queues all unpublished titles (batched, runs in background)",
                 "• Pending files: use <b>Skip watch catalog</b> or <b>Custom (no card)</b> for reels/lectures",
-                "• <b>Refresh existing cards</b> — update live posts; repost any that were deleted",
+                "• <b>Refresh existing cards</b> — sync TMDB poster + metadata (DB + live posts); repost if missing",
+                "• <b>Metadata gaps</b> — titles missing TMDB id and/or poster (fix in pending, then refresh)",
                 "• <b>Post all to channel</b> — new poster for every title (use if channel was cleared)",
                 "• <b>Fix card buttons</b> — ▶ Watch / watchlist links only (no caption changes)",
                 "• <b>Reset registry</b> — clear DB registry, then post all as new messages",
                 "• <b>Upload requests</b> — user-requested titles (poster cards, like TMDB pick)",
-                "• <b>Set channel</b> — which Telegram channel is the public watch feed",
+                "• Watch/ingest channels: <b>⚙️ Library setup</b> on the admin menu",
             ]
         )
 
@@ -455,19 +568,29 @@ async def send_watch_hub_menu(
     if not is_admin_user:
         keyboard.append([InlineKeyboardButton("« My menu", callback_data="main_menu")])
     if is_admin_user:
-        pub_row = [
-            InlineKeyboardButton(
-                "📤 Publish new cards", callback_data="watch_publish_run"
-            ),
-            InlineKeyboardButton("⚙️ Set channel", callback_data="set_watch_channel_menu"),
-        ]
-        keyboard.append(pub_row)
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    "📤 Publish new cards", callback_data="watch_publish_run"
+                ),
+            ]
+        )
         if published > 0:
             keyboard.append(
                 [
                     InlineKeyboardButton(
                         "🔄 Refresh existing cards",
                         callback_data="watch_refresh_catalog",
+                    ),
+                ]
+            )
+        gap_n = db.count_metadata_gap_summary().get("missing_any", 0)
+        if gap_n:
+            keyboard.append(
+                [
+                    InlineKeyboardButton(
+                        f"📋 Metadata gaps ({gap_n})",
+                        callback_data="watch_meta_gaps:all:0",
                     ),
                 ]
             )
@@ -532,36 +655,118 @@ async def send_my_requests_menu(
     await _edit_or_reply(target, "\n".join(lines), InlineKeyboardMarkup(keyboard), edit=edit)
 
 
-async def send_set_watch_channel_menu(
+async def send_watch_channels_hub(
     update: Update, context: ContextTypes.DEFAULT_TYPE, *, edit: bool = False
 ) -> None:
+    """Per-type distribution channels (catalog + delivery) — no .env required."""
+    from content_lanes import DISTRIBUTION_LANE_LABELS, WATCH_LANE_OPTIONS
+
     query = update.callback_query
     target = query if edit and query else update
-    channels = [c for c in db.get_all_channels_registered(active_only=False) if c.is_active]
-    current = db.get_watch_channel()
+    assignments = db.list_watch_lane_assignments()
     lines = [
-        "<b>📺 Watch channel setup</b>",
+        "<b>📤 Distribution channels</b>",
         "",
-        "Pick the channel where library files are <b>copied</b> for users. "
-        "The bot must be <b>admin</b> there and in source channels.",
+        "After indexing, published content goes here by <b>content type</b> "
+        "(poster cards, watch links).",
+        "",
+        "Index can ingest from messy dump channels — this is where the "
+        "<b>organized library</b> lives for users.",
+        "",
+        "The bot must be <b>admin</b> on each channel below.",
+        "",
+    ]
+    keyboard = []
+    for lane in WATCH_LANE_OPTIONS:
+        ch = assignments.get(lane)
+        label = DISTRIBUTION_LANE_LABELS.get(lane, lane)
+        if ch:
+            name = escape(ch.channel_title or ch.channel_username or ch.channel_id)
+            lines.append(f"{label}: <b>{name}</b>")
+        else:
+            lines.append(f"{label}: <i>not set</i>")
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    f"Set {label.split()[0]}",
+                    callback_data=f"set_watch_lane_menu:{lane}",
+                )
+            ]
+        )
+    back = context.user_data.get("setup_return") or "watch_hub"
+    if back == "setup_hub":
+        back_label = "« Library setup"
+    elif back == "setup_pipeline":
+        back_label = "« Pipeline targets"
+    else:
+        back_label = "« Watch library"
+    keyboard.append([InlineKeyboardButton(back_label, callback_data=back)])
+    await _edit_or_reply(target, "\n".join(lines), InlineKeyboardMarkup(keyboard), edit=edit)
+
+
+async def send_set_watch_channel_menu(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    lane: str = "media",
+    *,
+    edit: bool = False,
+) -> None:
+    from content_lanes import LANE_LABELS, normalize_lane
+
+    query = update.callback_query
+    target = query if edit and query else update
+    lane = normalize_lane(lane)
+    current = db.get_watch_channel_for_lane(lane)
+    channels = db.get_channels_bot_can_post(active_only=True)
+    if current and not any(str(c.channel_id) == str(current.channel_id) for c in channels):
+        channels = [current] + channels
+    label = LANE_LABELS.get(lane, lane)
+    lines = [
+        f"<b>{label}</b>",
+        "",
+        "Pick the Telegram channel where this content type is published.",
         "",
     ]
     if current:
         lines.append(f"Current: <b>{escape(current.channel_title or current.channel_id)}</b>")
     else:
-        lines.append("<i>None set — or set WATCH_CHANNEL_ID in .env</i>")
+        lines.append("<i>Not set — pick a channel below.</i>")
+    if not channels:
+        lines.extend(
+            [
+                "",
+                "<i>No channels where Index bot can post.</i>",
+                "Add the bot as <b>admin</b> to a channel, post once there, "
+                "or use <b>Discover bot channels</b> in Library setup.",
+            ]
+        )
     keyboard = []
+    if not channels:
+        keyboard.append(
+            [InlineKeyboardButton("🔍 Discover bot channels", callback_data="discover_channels_run")]
+        )
     for ch in channels[:20]:
         marker = "✅ " if current and str(ch.channel_id) == str(current.channel_id) else ""
         keyboard.append(
             [
                 InlineKeyboardButton(
-                    f"{marker}{ch.channel_title or ch.channel_id}"[:60],
-                    callback_data=f"set_watch_channel:{ch.channel_id}",
+                    f"{marker}{(ch.channel_title or ch.channel_id)}"[:60],
+                    callback_data=f"set_watch_lane:{lane}:{ch.channel_id}",
                 )
             ]
         )
-    keyboard.append([InlineKeyboardButton("« Watch hub", callback_data="watch_hub")])
+    if current:
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    "✕ Clear",
+                    callback_data=f"set_watch_lane_clear:{lane}",
+                )
+            ]
+        )
+    keyboard.append(
+        [InlineKeyboardButton("« Distribution channels", callback_data="set_watch_channels_hub")]
+    )
     await _edit_or_reply(target, "\n".join(lines), InlineKeyboardMarkup(keyboard), edit=edit)
 
 
@@ -916,7 +1121,7 @@ async def send_admin_upload_requests(
         if url:
             sent = await flood_reply_photo(
                 anchor,
-                url,
+                photo=url,
                 caption=caption,
                 parse_mode=ParseMode.HTML,
                 reply_markup=keyboard,
@@ -965,10 +1170,24 @@ async def run_watch_publish_batch(
         action = "Publishing catalog cards"
 
     status = query.message if edit and query else None
+    republish_all = republish or reset_registry
+    post_all_new = post_new or reset_registry
+    cap = Config.WATCH_CATALOG_PUBLISH_MAX_TOTAL
+    queue_total = catalog_queue_total(
+        db,
+        republish=republish_all,
+        post_new=post_all_new,
+        cap=cap if cap and cap > 0 else None,
+    )
+    total_line = (
+        f"\n<b>{queue_total}</b> catalog cards queued\n"
+        if queue_total
+        else ""
+    )
     if edit and query:
         await safe_edit_callback_message(
             query,
-            f"⏳ <b>Please wait</b>\n\n📤 <b>{action}…</b>\n\n"
+            f"⏳ <b>Please wait</b>\n\n📤 <b>{action}…</b>{total_line}\n"
             "<i>Runs in the background in batches — indexing and other bot work "
             "continues. Large catalogs may take a while.</i>",
             reply_markup=None,
@@ -982,17 +1201,25 @@ async def run_watch_publish_batch(
                 logger.info("Cleared %s watch catalog registry rows", cleared)
 
             async def progress(
-                done: int, ok: int, fail: int, batch_num: int
+                done: int,
+                ok: int,
+                fail: int,
+                batch_num: int,
+                total: int = 0,
             ) -> None:
                 if not status:
                     return
                 try:
+                    if total:
+                        prog = f"processed <b>{done}</b> / <b>{total}</b>"
+                    else:
+                        prog = f"processed <b>{done}</b>"
                     await flood_bot_edit_message_text(
                         context.bot,
                         status.chat_id,
                         status.message_id,
                         f"⏳ <b>{action}…</b>\n"
-                        f"Batch <b>{batch_num}</b> · processed <b>{done}</b>\n"
+                        f"Batch <b>{batch_num}</b> · {prog}\n"
                         f"✅ {ok} · ❌ {fail}",
                     )
                 except Exception:
@@ -1103,6 +1330,26 @@ async def handle_watch_callback(
     if data == "watch_hub":
         await send_watch_hub_menu(update, context, edit=True)
         return True
+
+    if data.startswith("watch_meta_gaps"):
+        if not Config.is_admin(user_id):
+            await safe_edit_callback_message(
+                query, "❌ Admin only.", parse_mode=ParseMode.HTML
+            )
+            return True
+        parts = data.split(":")
+        issue = parts[1] if len(parts) > 1 else "all"
+        page = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+        await send_metadata_gaps_menu(
+            update, context, edit=True, issue=issue, page=page
+        )
+        return True
+
+    if data.startswith("watch_archive"):
+        from archive_browse import handle_archive_callback
+
+        if await handle_archive_callback(data, update, context):
+            return True
 
     if data == "watch_favorites":
         await send_favorites_menu(update, context, edit=True)
@@ -1397,11 +1644,50 @@ async def handle_watch_callback(
         )
         return True
 
-    if data == "set_watch_channel_menu":
+    if data in ("set_watch_channel_menu", "set_watch_channels_hub"):
         if not Config.is_admin(user_id):
             await query.answer("Admin only", show_alert=True)
             return True
-        await send_set_watch_channel_menu(update, context, edit=True)
+        await send_watch_channels_hub(update, context, edit=True)
+        return True
+
+    if data.startswith("set_watch_lane_menu:"):
+        if not Config.is_admin(user_id):
+            await query.answer("Admin only", show_alert=True)
+            return True
+        lane = data.split(":", 1)[1]
+        await send_set_watch_channel_menu(update, context, lane, edit=True)
+        return True
+
+    if data.startswith("set_watch_lane_clear:"):
+        if not Config.is_admin(user_id):
+            await query.answer("Admin only", show_alert=True)
+            return True
+        lane = data.split(":", 1)[1]
+        db.clear_watch_channel_for_lane(lane)
+        await query.answer("Cleared", show_alert=False)
+        await send_watch_channels_hub(update, context, edit=True)
+        return True
+
+    if data.startswith("set_watch_lane:"):
+        if not Config.is_admin(user_id):
+            await query.answer("Admin only", show_alert=True)
+            return True
+        _, lane, cid = data.split(":", 2)
+        from bot_channel_access import verify_bot_can_post
+
+        if not await verify_bot_can_post(context.bot, cid):
+            await query.answer(
+                "Index bot must be admin in that channel to publish there.",
+                show_alert=True,
+            )
+            await send_set_watch_channel_menu(update, context, lane, edit=True)
+            return True
+        db.set_channel_bot_can_post(cid, True)
+        ch = db.set_watch_channel_for_lane(cid, lane)
+        if ch:
+            await query.answer("Distribution channel set", show_alert=False)
+        await send_watch_channels_hub(update, context, edit=True)
         return True
 
     if data.startswith("set_watch_channel:"):
@@ -1409,10 +1695,19 @@ async def handle_watch_callback(
             await query.answer("Admin only", show_alert=True)
             return True
         cid = data.split(":", 1)[1]
+        from bot_channel_access import verify_bot_can_post
+
+        if not await verify_bot_can_post(context.bot, cid):
+            await query.answer(
+                "Index bot must be admin in that channel to publish there.",
+                show_alert=True,
+            )
+            return True
+        db.set_channel_bot_can_post(cid, True)
         ch = db.set_watch_channel(cid)
         if ch:
             await query.answer("Watch channel set", show_alert=False)
-        await send_set_watch_channel_menu(update, context, edit=True)
+        await send_watch_channels_hub(update, context, edit=True)
         return True
 
     if data.startswith("watch_fav:"):
@@ -1719,17 +2014,93 @@ async def send_watchlist_pick_dm(
     )
 
 
+async def deliver_file_from_dm_start(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, upload_id: int
+) -> bool:
+    """Deliver a single indexed file from /start file_{upload_id}."""
+    from delivery_handoff import external_downloader_row
+    from message_verify import verify_upload_list_for_watch
+    from watch_library import (
+        deliver_upload_to_chat,
+        extract_quality_label,
+        message_link_for_upload,
+    )
+
+    msg = update.effective_message
+    chat = update.effective_chat
+    if not msg or not chat:
+        return False
+    user_id = update.effective_user.id if update.effective_user else 0
+    upload = db.get_file_upload(upload_id)
+    if not upload:
+        await msg.reply_text("File not found.")
+        return True
+    if not Config.is_admin(user_id) and not db.is_upload_publicly_accessible(upload):
+        await msg.reply_text("This file is not in the public library.")
+        return True
+    checked = await verify_upload_list_for_watch([upload], db)
+    if not checked:
+        await msg.reply_text("This file is no longer available in the channel.")
+        return True
+    upload = checked[0]
+    ct = (
+        db.get_content_title(upload.content_title_id)
+        if upload.content_title_id
+        else None
+    )
+    quality = extract_quality_label(upload.file_name)
+    try:
+        await deliver_upload_to_chat(
+            context.bot,
+            chat.id,
+            upload,
+            ct,
+            quality=quality,
+            reply_markup=None,
+        )
+    except Exception as e:
+        logger.error("file deep link delivery failed upload_id=%s: %s", upload_id, e)
+        await msg.reply_text("Could not send this file. Try again from the library menu.")
+        return True
+    rows = []
+    ext = external_downloader_row(upload.id)
+    if ext:
+        rows.append(ext)
+    if Config.is_admin(user_id):
+        link = message_link_for_upload(upload)
+        if link:
+            rows.append([InlineKeyboardButton("📎 Source channel", url=link)])
+    rows.append([InlineKeyboardButton("« Menu", callback_data="main_menu")])
+    title = db.display_title_for_content(ct, upload.file_name) if ct else upload.file_name
+    await msg.reply_text(
+        f"✅ <b>{escape(title[:80])}</b>",
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(rows),
+    )
+    return True
+
+
 async def handle_start_payload(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> bool:
-    """Deep links from catalog cards: watch_ · wl_ · fav_ · watch."""
+    """Deep links from catalog cards: watch_ · wl_ · fav_ · file_ · watch."""
     args = context.args or []
     if not args or not update.effective_message:
         return False
     payload = args[0]
     user_id = update.effective_user.id if update.effective_user else 0
 
-    from watch_deep_links import parse_watch_start_payload
+    from portal_bot import handle_portal_start_payload
+
+    if await handle_portal_start_payload(update, context, payload):
+        return True
+
+    from watch_deep_links import parse_file_start_payload, parse_watch_start_payload
+
+    file_id = parse_file_start_payload(payload)
+    if file_id is not None:
+        await deliver_file_from_dm_start(update, context, file_id)
+        return True
 
     parsed = parse_watch_start_payload(payload)
     if parsed:

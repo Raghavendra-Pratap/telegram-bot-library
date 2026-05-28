@@ -18,14 +18,16 @@ from database import Database
 from telegram_flood import (
     batch_pause,
     flood_edit_message_caption,
+    flood_edit_message_media,
     flood_send_message,
     flood_send_photo,
     is_unchanged_message_error,
+    parse_retry_after_seconds,
     parse_retry_after_text,
     watch_channel_chat_id,
 )
 from telegram_tags import join_hashtags, to_telegram_year_hashtag
-from tmdb_helper import poster_image_url, tmdb_helper, tmdb_web_url
+from tmdb_helper import best_poster_url, poster_image_url, tmdb_helper, tmdb_web_url
 from watch_deep_links import (
     bot_start_url,
     favorite_start_payload,
@@ -62,7 +64,9 @@ def build_catalog_caption(
     else:
         lines.append(f"<b>🎬 {title}{year_suffix}</b>")
 
-    vote = content_title.vote_average if content_title else en.get("vote_average")
+    vote = en.get("vote_average")
+    if vote in (None, "") and content_title:
+        vote = content_title.vote_average
     if vote not in (None, ""):
         try:
             lines.append(f"⭐ <b>{float(vote):.1f}</b> / 10")
@@ -257,6 +261,92 @@ def _is_missing_channel_message_error(exc: BaseException) -> bool:
     )
 
 
+def _bad_poster_url_error(exc: BaseException) -> bool:
+    msg = str(exc).lower()
+    return "wrong type of the web page content" in msg or "failed to get http url content" in msg
+
+
+def _is_no_media_to_edit_error(exc: BaseException) -> bool:
+    msg = str(exc).lower()
+    return "there is no media in the message" in msg or "message is not modified" in msg
+
+
+def _parse_ct_genres(content_title) -> list:
+    if not content_title or not content_title.genres:
+        return []
+    try:
+        parsed = json.loads(content_title.genres)
+        return parsed if isinstance(parsed, list) else []
+    except (json.JSONDecodeError, TypeError):
+        return []
+
+
+def _db_enrichment_for_persist(
+    ct, enrichment: dict, season_number: int | None
+) -> dict:
+    """Show-level TMDB fields for DB; season cards keep season art only on Telegram."""
+    mt = (ct.media_type or "movie").lower()
+    if (
+        mt in ("tv", "series")
+        and season_number is not None
+        and ct.tmdb_id
+        and tmdb_helper.enabled
+    ):
+        show = tmdb_helper.build_catalog_enrichment(
+            tmdb_id=int(ct.tmdb_id),
+            media_type=mt,
+            season_number=None,
+        )
+        if show:
+            return show
+    return enrichment
+
+
+def _persist_catalog_enrichment(
+    db: Database, ct, enrichment: dict, *, season_number: int | None
+):
+    if not enrichment or not ct:
+        return ct
+    row = _db_enrichment_for_persist(ct, enrichment, season_number)
+    genres = row.get("genres") or _parse_ct_genres(ct)
+    name = (ct.tmdb_title or ct.name or "").strip()
+    if not name:
+        return ct
+    vote = row.get("vote_average")
+    if vote in (None, ""):
+        vote = ct.vote_average
+    overview = (row.get("overview") or ct.overview or "").strip() or None
+    poster_path = row.get("poster_path") or ct.poster_path
+    if not poster_path and row.get("backdrop_path"):
+        poster_path = row.get("backdrop_path")
+    updated = db.upsert_content_title(
+        local_name=name,
+        media_type=ct.media_type or "movie",
+        tmdb_id=ct.tmdb_id,
+        tmdb_title=row.get("tmdb_title") or ct.tmdb_title,
+        release_year=row.get("release_year")
+        if row.get("release_year") is not None
+        else ct.release_year,
+        poster_path=poster_path,
+        overview=overview,
+        vote_average=vote,
+        genres=genres or None,
+    )
+    if updated and getattr(updated, "id", None):
+        fresh = db.get_content_title(int(updated.id))
+        return fresh or updated
+    return ct
+
+
+def _catalog_poster_url(enrichment: dict, ct, *, size: str = "w500") -> str | None:
+    meta = {
+        "poster_path": enrichment.get("poster_path") or ct.poster_path,
+        "backdrop_path": enrichment.get("backdrop_path"),
+        "media_type": (ct.media_type or "movie").lower(),
+    }
+    return best_poster_url(meta, size=size) or poster_image_url(meta, size=size)
+
+
 async def _send_new_catalog_post(
     bot: Bot,
     *,
@@ -266,24 +356,92 @@ async def _send_new_catalog_post(
     keyboard: InlineKeyboardMarkup,
 ) -> int:
     if poster:
-        msg = await flood_send_photo(
-            bot,
-            dest,
-            photo=poster,
-            caption=caption,
-            parse_mode=ParseMode.HTML,
-            reply_markup=keyboard,
-        )
-    else:
-        msg = await flood_send_message(
-            bot,
-            dest,
-            caption,
-            parse_mode=ParseMode.HTML,
-            reply_markup=keyboard,
-            disable_web_page_preview=True,
-        )
+        try:
+            msg = await flood_send_photo(
+                bot,
+                dest,
+                photo=poster,
+                caption=caption,
+                parse_mode=ParseMode.HTML,
+                reply_markup=keyboard,
+            )
+            return int(msg.message_id)
+        except (BadRequest, TelegramError) as e:
+            if not _bad_poster_url_error(e):
+                raise
+            logger.warning(
+                "catalog poster URL rejected, sending text-only: %s", poster[:80]
+            )
+    msg = await flood_send_message(
+        bot,
+        dest,
+        caption,
+        parse_mode=ParseMode.HTML,
+        reply_markup=keyboard,
+        disable_web_page_preview=True,
+    )
     return int(msg.message_id)
+
+
+async def _refresh_catalog_post_in_place(
+    bot: Bot,
+    *,
+    edit_chat: int,
+    message_id: int,
+    poster: str | None,
+    caption: str,
+    keyboard: InlineKeyboardMarkup,
+) -> bool:
+    """Edit an existing channel card. Returns False if caller should repost."""
+    try:
+        if poster:
+            await flood_edit_message_media(
+                bot,
+                edit_chat,
+                message_id,
+                photo=poster,
+                caption=caption,
+                reply_markup=keyboard,
+            )
+        else:
+            await flood_edit_message_caption(
+                bot,
+                edit_chat,
+                message_id,
+                caption,
+                reply_markup=keyboard,
+            )
+        return True
+    except BadRequest as e:
+        if is_unchanged_message_error(e):
+            return True
+        if poster and (
+            _is_no_media_to_edit_error(e) or _bad_poster_url_error(e)
+        ):
+            try:
+                await flood_edit_message_caption(
+                    bot,
+                    edit_chat,
+                    message_id,
+                    caption,
+                    reply_markup=keyboard,
+                )
+                return True
+            except BadRequest as e2:
+                if is_unchanged_message_error(e2):
+                    return True
+            except TelegramError:
+                pass
+            return False
+        if _is_missing_channel_message_error(e):
+            return False
+        logger.warning("refresh catalog post %s failed (%s)", message_id, e)
+        return False
+    except TelegramError as e:
+        if poster and _bad_poster_url_error(e):
+            return False
+        logger.warning("refresh catalog post %s failed (%s)", message_id, e)
+        return False
 
 
 async def publish_catalog_slot(
@@ -296,9 +454,14 @@ async def publish_catalog_slot(
     force: bool = False,
     post_new: bool = False,
 ) -> tuple[bool, str]:
-    watch_ch = db.get_watch_channel()
+    from content_lanes import LANE_MEDIA, lane_allows_watch_catalog, normalize_lane
+
+    lane = normalize_lane(db.get_content_title_lane(content_title_id))
+    if not lane_allows_watch_catalog(lane):
+        return False, f"Only {LANE_MEDIA} lane titles can publish watch catalog cards"
+    watch_ch = db.get_watch_channel(lane)
     if not watch_ch:
-        return False, "Watch channel not configured"
+        return False, f"Watch channel not configured for lane {lane}"
 
     existing = db.get_watch_catalog_post(content_title_id, season_number)
     if not force and not post_new and existing:
@@ -311,6 +474,10 @@ async def publish_catalog_slot(
         return True, "Excluded"
 
     mt = (ct.media_type or "movie").lower()
+    if mt == "course":
+        return False, "Courses do not publish catalog cards"
+    if not ct.tmdb_id:
+        return False, "TMDB mapping required before publishing"
     enrichment: dict = {}
     if ct.tmdb_id and tmdb_helper.enabled:
         enrichment = tmdb_helper.build_catalog_enrichment(
@@ -318,14 +485,12 @@ async def publish_catalog_slot(
             media_type=mt,
             season_number=season_number if mt in ("tv", "series") else None,
         )
+        if enrichment:
+            ct = _persist_catalog_enrichment(
+                db, ct, enrichment, season_number=season_number
+            )
 
-    poster = poster_image_url(
-        {
-            "poster_path": enrichment.get("poster_path") or ct.poster_path,
-            "media_type": mt,
-        },
-        size="w500",
-    )
+    poster = _catalog_poster_url(enrichment, ct, size="w500")
     file_count = db.count_uploads_in_catalog_slot(content_title_id, season_number)
     caption = build_catalog_caption(
         ct,
@@ -343,15 +508,16 @@ async def publish_catalog_slot(
     had_registry = bool(existing)
 
     if refresh_in_place and existing and existing.message_id:
-        edit_chat = existing.watch_channel_id or channel_id
-        try:
-            await flood_edit_message_caption(
-                bot,
-                int(edit_chat),
-                int(existing.message_id),
-                caption,
-                reply_markup=keyboard,
-            )
+        edit_chat = int(existing.watch_channel_id or channel_id)
+        updated = await _refresh_catalog_post_in_place(
+            bot,
+            edit_chat=edit_chat,
+            message_id=int(existing.message_id),
+            poster=poster,
+            caption=caption,
+            keyboard=keyboard,
+        )
+        if updated:
             db.save_watch_catalog_post(
                 content_title_id,
                 season_number,
@@ -359,26 +525,10 @@ async def publish_catalog_slot(
                 int(existing.message_id),
             )
             return True, "Updated"
-        except BadRequest as e:
-            if is_unchanged_message_error(e):
-                return True, "Updated"
-            if not _is_missing_channel_message_error(e):
-                logger.warning(
-                    "edit catalog post %s failed (%s), sending new post",
-                    existing.message_id,
-                    e,
-                )
-            else:
-                logger.info(
-                    "catalog post %s missing in channel, reposting",
-                    existing.message_id,
-                )
-        except TelegramError as e:
-            logger.warning(
-                "edit catalog post %s failed (%s), sending new post",
-                existing.message_id,
-                e,
-            )
+        logger.info(
+            "catalog post %s refresh failed, reposting",
+            existing.message_id,
+        )
 
     try:
         new_mid = await _send_new_catalog_post(
@@ -475,6 +625,23 @@ async def publish_catalog_batch(
 _catalog_publish_lock = asyncio.Lock()
 
 
+def catalog_queue_total(
+    db: Database,
+    *,
+    republish: bool = False,
+    post_new: bool = False,
+    cap: int | None = None,
+) -> int:
+    """How many catalog slots will be processed for this publish run."""
+    if republish or post_new:
+        n = db.count_library_catalog_slots()
+    else:
+        n = db.count_unpublished_catalog_slots()
+    if cap and cap > 0:
+        n = min(n, cap)
+    return n
+
+
 async def publish_catalog_all(
     bot: Bot,
     db: Database,
@@ -531,12 +698,27 @@ async def _publish_catalog_all_locked(
 ) -> tuple[int, int, list[str], int, dict]:
     total_ok = total_fail = 0
     all_errors: list[str] = []
-    agg = {"updated": 0, "reposted": 0, "published": 0, "batches": 0}
+    queue_total = catalog_queue_total(
+        db, republish=republish, post_new=post_new, cap=cap
+    )
+    agg = {
+        "updated": 0,
+        "reposted": 0,
+        "published": 0,
+        "batches": 0,
+        "queue_total": queue_total,
+    }
     offset = 0
 
     async def _progress(done: int, _batch_total: int, ok: int, fail: int) -> None:
         if progress_callback:
-            await progress_callback(done, total_ok + ok, total_fail + fail, agg["batches"] + 1)
+            await progress_callback(
+                done,
+                total_ok + ok,
+                total_fail + fail,
+                agg["batches"] + 1,
+                queue_total,
+            )
 
     while True:
         if cap and total_ok + total_fail >= cap:
@@ -603,8 +785,10 @@ async def maybe_auto_publish_catalog_for_upload(
     upload = db.get_file_upload(upload_id)
     if not upload or not upload.content_title_id:
         return
+    if not db.is_catalog_publishable(upload.content_title_id):
+        return
     ct = db.get_content_title(upload.content_title_id)
-    if not ct or getattr(ct, "catalog_excluded", False):
+    if not ct:
         return
     mt = (ct.media_type or "movie").lower()
     season = None
@@ -620,3 +804,32 @@ async def maybe_auto_publish_catalog_for_upload(
         )
     except Exception as e:
         logger.warning("auto catalog publish failed: %s", e)
+
+
+async def unpublish_catalog_slot(
+    bot: Bot,
+    db: Database,
+    content_title_id: int,
+    season_number: int | None,
+) -> tuple[bool, str]:
+    """Delete Telegram catalog card and remove publish registry."""
+    existing = db.get_watch_catalog_post(content_title_id, season_number)
+    if not existing:
+        return False, "Not published"
+
+    chat = existing.watch_channel_id
+    msg_id = existing.message_id
+    if chat and msg_id:
+        try:
+            await bot.delete_message(chat_id=int(chat), message_id=int(msg_id))
+        except (BadRequest, TelegramError) as e:
+            logger.warning(
+                "unpublish delete_message failed ct=%s season=%s: %s",
+                content_title_id,
+                season_number,
+                e,
+            )
+
+    if not db.delete_watch_catalog_post(content_title_id, season_number):
+        return False, "Failed to remove publish record"
+    return True, "Unpublished"

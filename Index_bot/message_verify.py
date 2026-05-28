@@ -35,6 +35,16 @@ def telethon_session_path() -> Path:
     return path
 
 
+def telethon_portal_session_path() -> Path:
+    """Separate Telethon session for portal streaming (bot uses telethon_session_path)."""
+    from config import Config
+
+    path = Path(Config.TELETHON_PORTAL_SESSION or "forward_ingest_portal.session")
+    if not path.is_absolute():
+        path = _ROOT / path
+    return path
+
+
 def telethon_configured() -> bool:
     api_id = os.getenv("API_ID", "").strip()
     api_hash = os.getenv("API_HASH", "").strip()

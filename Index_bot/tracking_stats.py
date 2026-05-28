@@ -246,6 +246,102 @@ def format_multipart_tracking_detail(
     return "\n".join(lines)
 
 
+def tracking_entry_is_complete(entry: dict) -> bool | None:
+    """True if indexed counts meet TMDB totals; None when total is unknown."""
+    kind = entry.get("kind")
+    if kind == "tv":
+        total = entry.get("tmdb_episodes")
+        if total is None:
+            return None
+        try:
+            total_n = int(total)
+        except (TypeError, ValueError):
+            return None
+        if total_n <= 0:
+            return None
+        return int(entry.get("indexed_episodes") or 0) >= total_n
+    if kind == "multipart":
+        total = entry.get("total_parts")
+        if not total:
+            return None
+        try:
+            total_n = int(total)
+        except (TypeError, ValueError):
+            return None
+        if total_n <= 0:
+            return None
+        return int(entry.get("indexed_parts") or 0) >= total_n
+    if kind == "collection":
+        total = entry.get("total_parts")
+        if not total:
+            return None
+        try:
+            total_n = int(total)
+        except (TypeError, ValueError):
+            return None
+        if total_n <= 0:
+            return None
+        return int(entry.get("indexed_parts") or 0) >= total_n
+    return None
+
+
+def tracking_entry_sort_year(entry: dict) -> int:
+    """Newest-first sort key from release year (or newest collection part)."""
+    yr = entry.get("release_year")
+    if yr is not None:
+        try:
+            return int(yr)
+        except (TypeError, ValueError):
+            pass
+    best = 0
+    for part in entry.get("parts") or []:
+        py = part.get("year")
+        if py is not None:
+            try:
+                best = max(best, int(py))
+            except (TypeError, ValueError):
+                continue
+    return best
+
+
+def enrich_tracking_entry(entry: dict) -> dict:
+    out = dict(entry)
+    complete = tracking_entry_is_complete(out)
+    out["is_complete"] = complete
+    if complete is True:
+        out["completion_status"] = "complete"
+    elif complete is False:
+        out["completion_status"] = "incomplete"
+    else:
+        out["completion_status"] = "unknown"
+    out["sort_year"] = tracking_entry_sort_year(out)
+    return out
+
+
+def filter_tracking_completion(
+    entries: list[dict], completion: str = "all"
+) -> list[dict]:
+    key = (completion or "all").lower()
+    if key == "complete":
+        return [e for e in entries if e.get("is_complete") is True]
+    if key == "incomplete":
+        return [e for e in entries if e.get("is_complete") is not True]
+    return entries
+
+
+def sort_tracking_entries(entries: list[dict]) -> list[dict]:
+    """Incomplete first, then complete; within each group newest release year first."""
+
+    def sort_key(e: dict) -> tuple:
+        complete = e.get("is_complete")
+        # 0 = incomplete or unknown (first), 1 = complete (last)
+        group = 1 if complete is True else 0
+        year = -(e.get("sort_year") or 0)
+        return (group, year, (e.get("title") or "").lower())
+
+    return sorted(entries, key=sort_key)
+
+
 def tracking_menu_button_label(entry: dict, *, max_len: int = 60) -> str:
     kind = entry.get("kind")
     title = (entry.get("title") or "?")[:22]
@@ -278,6 +374,7 @@ def build_tracking_list_keyboard(
     page: int = 0,
     page_size: int = 12,
     filter_kind: str = "all",
+    completion: str = "all",
 ) -> InlineKeyboardMarkup:
     start = page * page_size
     chunk = entries[start : start + page_size]
@@ -294,13 +391,20 @@ def build_tracking_list_keyboard(
                 ]
             )
     nav = []
+    comp = completion or "all"
+    page_cb = f"{filter_kind}:{comp}"
+
     if page > 0:
         nav.append(
-            InlineKeyboardButton("« Prev", callback_data=f"tracking_page:{page - 1}:{filter_kind}")
+            InlineKeyboardButton(
+                "« Prev", callback_data=f"tracking_page:{page - 1}:{page_cb}"
+            )
         )
     if start + page_size < len(entries):
         nav.append(
-            InlineKeyboardButton("Next »", callback_data=f"tracking_page:{page + 1}:{filter_kind}")
+            InlineKeyboardButton(
+                "Next »", callback_data=f"tracking_page:{page + 1}:{page_cb}"
+            )
         )
     if nav:
         rows.append(nav)
@@ -308,15 +412,31 @@ def build_tracking_list_keyboard(
         [
             InlineKeyboardButton(
                 "All" if filter_kind != "all" else "• All",
-                callback_data="tracking_filter:all",
+                callback_data=f"tracking_filter:all:{comp}",
             ),
             InlineKeyboardButton(
                 "TV" if filter_kind != "tv" else "• TV",
-                callback_data="tracking_filter:tv",
+                callback_data=f"tracking_filter:tv:{comp}",
             ),
             InlineKeyboardButton(
                 "Franchise" if filter_kind != "franchise" else "• Franchise",
-                callback_data="tracking_filter:franchise",
+                callback_data=f"tracking_filter:franchise:{comp}",
+            ),
+        ]
+    )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                "Incomplete" if comp != "incomplete" else "• Incomplete",
+                callback_data=f"tracking_filter:{filter_kind}:incomplete",
+            ),
+            InlineKeyboardButton(
+                "Complete" if comp != "complete" else "• Complete",
+                callback_data=f"tracking_filter:{filter_kind}:complete",
+            ),
+            InlineKeyboardButton(
+                "Any" if comp != "all" else "• Any",
+                callback_data=f"tracking_filter:{filter_kind}:all",
             ),
         ]
     )

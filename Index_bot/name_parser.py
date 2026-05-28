@@ -141,6 +141,114 @@ def strip_leading_sequence_prefix(filename: str) -> str:
     return base + ext
 
 
+# Channel / uploader prefix: @Clipmate_Movie_Title_... or Aclipmate Movie Title ...
+_CLIPMATE_MOVIE_PREFIX = re.compile(
+    r"^@?clipmate[._\s\-]*movie[._\s\-]*",
+    re.I,
+)
+_CLIPMATE_MOVIE_PREFIX_SPACED = re.compile(
+    r"^aclipmate\s+movie\s+",
+    re.I,
+)
+
+
+def strip_clipmate_movie_prefix(filename: str) -> str:
+    """
+    Remove Clipmate Movie uploader prefix; the real title starts immediately after.
+
+    Handles @Clipmate_Movie_, @clipmate_movie_, and already-normalized Aclipmate Movie .
+    """
+    if not filename or "clipmate" not in filename.lower():
+        return filename
+    ext_m = re.search(r"\.([^.]+)$", filename, re.I)
+    ext = (
+        f".{ext_m.group(1)}"
+        if ext_m and ext_m.group(1).lower() in MEDIA_EXTENSIONS
+        else ""
+    )
+    base = filename[: -len(ext)] if ext else filename
+    if not base:
+        return filename
+
+    stripped = _CLIPMATE_MOVIE_PREFIX.sub("", base, count=1)
+    if stripped == base:
+        stripped = _CLIPMATE_MOVIE_PREFIX_SPACED.sub("", base, count=1)
+    return stripped + ext
+
+
+_strip_rules_cache: list[dict] | None = None
+
+
+def invalidate_filename_strip_rules_cache() -> None:
+    global _strip_rules_cache
+    _strip_rules_cache = None
+
+
+def _load_filename_strip_rules() -> list[dict]:
+    global _strip_rules_cache
+    if _strip_rules_cache is None:
+        try:
+            from database import Database
+
+            _strip_rules_cache = Database().list_filename_strip_rules()
+        except Exception as e:
+            logger.warning("Could not load filename strip rules: %s", e)
+            _strip_rules_cache = []
+    return _strip_rules_cache
+
+
+def apply_filename_strip_rules(filename: str, rules: list[dict] | None = None) -> str:
+    """
+    Remove configured uploader / channel prefixes before title parsing.
+
+    Rules are applied longest-first as case-insensitive leading literals, or as
+    regex (first match only at start when pattern is anchored).
+    """
+    if not filename:
+        return filename
+    rules = rules if rules is not None else _load_filename_strip_rules()
+    if not rules:
+        return filename
+
+    ext_m = re.search(r"\.([^.]+)$", filename, re.I)
+    ext = (
+        f".{ext_m.group(1)}"
+        if ext_m and ext_m.group(1).lower() in MEDIA_EXTENSIONS
+        else ""
+    )
+    base = filename[: -len(ext)] if ext else filename
+    if not base:
+        return filename
+
+    active = [r for r in rules if r.get("is_active", True) and (r.get("pattern") or "").strip()]
+    active.sort(key=lambda r: len(r["pattern"]), reverse=True)
+
+    changed = True
+    while changed:
+        changed = False
+        for rule in active:
+            pattern = rule["pattern"]
+            if rule.get("is_regex"):
+                try:
+                    new_base, n = re.subn(
+                        pattern, "", base, count=1, flags=re.IGNORECASE
+                    )
+                    if n:
+                        base = new_base.lstrip()
+                        changed = True
+                except re.error:
+                    logger.warning("Invalid filename strip regex: %s", pattern)
+                continue
+            pl = pattern.lower()
+            bl = base.lower()
+            while bl.startswith(pl):
+                base = base[len(pattern) :]
+                bl = base.lower()
+                changed = True
+
+    return base.lstrip() + ext
+
+
 def fix_zero_o_homoglyph(text: str) -> str:
     """Fix 0 used as o in release titles (not season codes like S01)."""
     if not text:
@@ -458,7 +566,9 @@ class NameParser:
         
         original_filename = filename
         filename = fix_bypass_character_substitutions(
-            strip_leading_sequence_prefix(filename)
+            strip_clipmate_movie_prefix(
+                strip_leading_sequence_prefix(apply_filename_strip_rules(filename))
+            )
         )
 
         # Extract year first

@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#0d1117" />
+  <title>Library</title>
+  <link rel="stylesheet" href="/static/styles.css?v=20" />
+</head>
+<body>
+  <div id="login" class="login-screen hidden">
+    <h2>🎬 Watch portal</h2>
+    <p>Open Telegram and send <strong>/portal</strong> to your Index bot, then open the link it sends you.</p>
+  </div>
+
+  <div id="app" class="hidden">
+    <div class="app-shell" id="appShell">
+    <aside id="adminSidebar" class="sidebar hidden" aria-label="Admin navigation">
+      <div class="sidebar-brand">
+        <span class="sidebar-brand-main"><span class="logo">▶</span> <span class="sidebar-label">Admin</span></span>
+        <button type="button" id="sidebarCollapseBtn" class="sidebar-collapse-btn" aria-label="Collapse menu" aria-expanded="true" title="Collapse menu">«</button>
+      </div>
+      <nav class="sidebar-nav">
+        <button type="button" class="sidebar-link active" data-admin-section="dashboard" title="Home"><span class="sidebar-icon" aria-hidden="true">🏠</span><span class="sidebar-label">Home</span></button>
+        <button type="button" class="sidebar-link" data-admin-section="channels" title="Channel monitoring"><span class="sidebar-icon" aria-hidden="true">📢</span><span class="sidebar-label">Channels</span></button>
+        <button type="button" class="sidebar-link" data-admin-section="media" title="Media library"><span class="sidebar-icon" aria-hidden="true">🎬</span><span class="sidebar-label">Media library</span></button>
+        <button type="button" class="sidebar-link" data-admin-section="courses" title="Course library"><span class="sidebar-icon" aria-hidden="true">🎓</span><span class="sidebar-label">Course library</span></button>
+        <button type="button" class="sidebar-link" data-admin-section="archive" title="Archive library"><span class="sidebar-icon" aria-hidden="true">📦</span><span class="sidebar-label">Archive library</span></button>
+        <button type="button" class="sidebar-link" data-admin-section="shortform" title="Shortform library"><span class="sidebar-icon" aria-hidden="true">📱</span><span class="sidebar-label">Shortform library</span></button>
+        <button type="button" class="sidebar-link" data-admin-section="adult" title="Adult library"><span class="sidebar-icon" aria-hidden="true">🔒</span><span class="sidebar-label">Adult library</span></button>
+        <button type="button" class="sidebar-link" data-admin-section="noncatalog" title="Skip catalog — indexed only"><span class="sidebar-icon" aria-hidden="true">🚫</span><span class="sidebar-label">Non-catalog</span></button>
+        <button type="button" class="sidebar-link" data-admin-section="tracking" title="Tracking list"><span class="sidebar-icon" aria-hidden="true">📡</span><span class="sidebar-label">Tracking list</span></button>
+        <button type="button" class="sidebar-link" data-admin-section="pending" title="Pending list"><span class="sidebar-icon" aria-hidden="true">⏳</span><span class="sidebar-label">Pending list</span></button>
+        <button type="button" class="sidebar-link" data-admin-section="watch" title="Watch library"><span class="sidebar-icon" aria-hidden="true">📺</span><span class="sidebar-label">Watch library</span></button>
+        <button type="button" class="sidebar-link" data-admin-section="metadata" title="Metadata gaps"><span class="sidebar-icon" aria-hidden="true">🖼</span><span class="sidebar-label">Metadata gaps</span></button>
+        <button type="button" class="sidebar-link" data-admin-section="filename-rules" title="Filename prefixes"><span class="sidebar-icon" aria-hidden="true">✂️</span><span class="sidebar-label">Filename rules</span></button>
+        <button type="button" class="sidebar-link" data-admin-section="pipeline" title="Upload pipeline"><span class="sidebar-icon" aria-hidden="true">📤</span><span class="sidebar-label">Upload pipeline</span></button>
+        <button type="button" class="sidebar-link" data-admin-section="requests" title="User requests"><span class="sidebar-icon" aria-hidden="true">📩</span><span class="sidebar-label">User requests</span></button>
+      </nav>
+      <div class="sidebar-footer">
+        <button type="button" class="sidebar-link subtle" data-admin-section="watchlist" title="Watch later"><span class="sidebar-icon" aria-hidden="true">🔖</span><span class="sidebar-label">Watch later</span></button>
+        <button type="button" class="sidebar-link subtle" data-admin-section="favorites" title="Favorites"><span class="sidebar-icon" aria-hidden="true">❤️</span><span class="sidebar-label">Favorites</span></button>
+      </div>
+    </aside>
+    <div class="main-column">
+    <header class="site-header">
+      <div class="header-row">
+        <button type="button" class="sidebar-toggle hidden" id="sidebarToggle" aria-label="Open menu">☰</button>
+        <h1><span class="logo">▶</span> <span id="pageTitleText">Library</span></h1>
+        <div class="search-bar">
+          <input type="search" id="searchInput" placeholder="Search titles…" autocomplete="off" enterkeyhint="search" />
+        </div>
+      </div>
+      <div class="header-actions" id="headerActions">
+        <nav class="tabs tabs-main" id="userTabs" aria-label="Main navigation">
+          <button type="button" data-tab="browse" class="active">Browse</button>
+          <button type="button" data-tab="watchlist">Watch later</button>
+          <button type="button" data-tab="favorites">Favorites</button>
+        </nav>
+        <div id="browseChrome" class="browse-chrome">
+          <div class="browse-tools">
+          <button type="button" class="tool-btn" id="typeMenuBtn" aria-expanded="false" aria-controls="typePanel">
+            Type · <span id="typeMenuLabel">All</span>
+          </button>
+          <button type="button" class="tool-btn" id="sortMenuBtn" aria-expanded="false" aria-controls="sortPanel">
+            Sort · <span id="sortMenuLabel">Recent</span>
+          </button>
+        </div>
+        <div id="typePanel" class="tool-panel hidden" role="dialog" aria-label="Media type">
+          <div class="tool-panel-inner filter-scroll" role="tablist">
+            <button type="button" class="filter-btn active" data-filter="all">All</button>
+            <button type="button" class="filter-btn" data-filter="movie">Movies</button>
+            <button type="button" class="filter-btn" data-filter="tv">Series</button>
+            <button type="button" class="filter-btn" data-filter="course">Courses</button>
+          </div>
+        </div>
+        <div id="sortPanel" class="tool-panel hidden" role="dialog" aria-label="Sort and filters">
+          <div class="tool-panel-inner sort-panel-grid">
+            <label>Sort
+              <select id="browseSort">
+                <option value="recent">Recently added</option>
+                <option value="rating">Rating</option>
+                <option value="year">Year</option>
+                <option value="title">Title</option>
+              </select>
+            </label>
+            <label>Order
+              <select id="browseOrder">
+                <option value="desc">High → low</option>
+                <option value="asc">Low → high</option>
+              </select>
+            </label>
+            <label>Min ★
+              <input type="number" id="minRating" min="0" max="10" step="0.5" placeholder="Any" inputmode="decimal" />
+            </label>
+            <label>From year
+              <input type="number" id="minYear" placeholder="Any" inputmode="numeric" />
+            </label>
+            <label>To year
+              <input type="number" id="maxYear" placeholder="Any" inputmode="numeric" />
+            </label>
+            <div class="sort-panel-actions">
+              <button type="button" class="btn ghost btn-sm" id="clearFiltersBtn">Clear</button>
+              <button type="button" class="btn primary btn-sm" id="applyFiltersBtn">Apply</button>
+            </div>
+          </div>
+        </div>
+        </div>
+      </div>
+    </header>
+    <main>
+      <div id="browseView">
+        <p id="browseMeta" class="browse-meta sub"></p>
+        <div id="grid" class="grid"></div>
+        <nav id="pagination" class="pagination hidden" aria-label="Pages"></nav>
+      </div>
+      <div id="searchView" class="hidden">
+        <h2>Search results</h2>
+        <h3>In your library</h3>
+        <div id="searchLib" class="grid"></div>
+        <h3>Request from TMDB</h3>
+        <div id="searchTmdb" class="grid"></div>
+      </div>
+      <div id="detailView" class="hidden"></div>
+      <div id="dashboardView" class="admin-section-view hidden admin-panel">
+        <h2>Home</h2>
+        <p class="sub">Overview of library, catalog, channels, and queues.</p>
+        <div id="adminStats" class="admin-stats"></div>
+        <section class="admin-section">
+          <h3>Quick actions</h3>
+          <div class="dashboard-actions">
+            <button type="button" class="btn secondary btn-sm" data-goto="pending">Pending review</button>
+            <button type="button" class="btn secondary btn-sm" data-goto="watch">Watch library</button>
+            <button type="button" class="btn secondary btn-sm" data-goto="metadata">Metadata gaps</button>
+            <button type="button" class="btn secondary btn-sm" data-goto="media">Media library</button>
+            <button type="button" class="btn secondary btn-sm" data-goto="adult">Adult library</button>
+            <button type="button" class="btn secondary btn-sm" data-goto="noncatalog">Non-catalog</button>
+            <button type="button" class="btn secondary btn-sm" data-goto="channels">Channel monitoring</button>
+          </div>
+        </section>
+      </div>
+      <div id="channelsMonitorView" class="admin-section-view hidden admin-panel">
+        <h2>Channel monitoring</h2>
+        <p class="sub">Where the bot indexes new posts live vs where your Telethon session polls (member watch).</p>
+        <div id="channelsMonitorSummary" class="admin-stats"></div>
+        <section class="admin-section">
+          <h3>🤖 Bot live index</h3>
+          <p class="sub">Bot is admin here — new channel posts are indexed automatically.</p>
+          <div id="channelsBotIndexTable" class="channel-monitor-table-wrap"></div>
+        </section>
+        <section class="admin-section">
+          <h3>📡 Telethon member watch</h3>
+          <p class="sub">Bot is not admin — your logged-in account polls for new files on a schedule.</p>
+          <div id="channelsMemberWatchTable" class="channel-monitor-table-wrap"></div>
+        </section>
+        <section class="admin-section hidden" id="channelsIngestSection">
+          <h3>📥 Ingest sink</h3>
+          <div id="channelsIngestTable" class="channel-monitor-table-wrap"></div>
+        </section>
+      </div>
+      <div id="pendingView" class="admin-section-view hidden admin-panel">
+        <h2>Pending list</h2>
+        <p class="sub">Review uploads — same as bot <code>/pending</code>. Changing <b>Lane</b> to course, archive, shortform, or adult removes the item from pending. <b>Media</b> stays pending until <b>TMDB map</b>.</p>
+        <p id="adminPendingSummary" class="sub"></p>
+        <button type="button" class="btn secondary btn-sm" id="adminRetryAllTmdb">🔄 Retry TMDB (all pending)</button>
+        <h3 class="admin-subhead">Batch map</h3>
+        <p class="sub">One TMDB pick for a whole series.</p>
+        <div id="adminBatchList"></div>
+        <nav id="adminBatchPag" class="pagination"></nav>
+        <h3 class="admin-subhead">Single files</h3>
+        <div id="adminPendingList"></div>
+        <nav id="adminPendingPag" class="pagination"></nav>
+      </div>
+      <div id="requestsView" class="admin-section-view hidden admin-panel admin-panel--poster-grid">
+        <h2>User requests</h2>
+        <div id="adminRequestsList" class="grid"></div>
+        <p id="requestsListMeta" class="sub"></p>
+        <nav id="requestsPag" class="pagination hidden" aria-label="User requests pages"></nav>
+      </div>
+      <div id="trackingView" class="admin-section-view hidden admin-panel">
+        <h2>Tracking list</h2>
+        <p class="sub">TV seasons and multipart movies from your library (fast list — TMDB franchise collections load in the bot only).</p>
+        <div class="tracking-toolbar">
+          <label class="tracking-select-wrap" for="trackingKindSelect">
+            <span class="tracking-select-label">Type</span>
+            <select id="trackingKindSelect" class="tracking-select" aria-label="Tracking type">
+              <option value="all">All</option>
+              <option value="tv">TV</option>
+              <option value="franchise">Franchise</option>
+            </select>
+          </label>
+          <label class="tracking-select-wrap" for="trackingStatusSelect">
+            <span class="tracking-select-label">Status</span>
+            <select id="trackingStatusSelect" class="tracking-select" aria-label="Tracking status">
+              <option value="all">Any status</option>
+              <option value="incomplete">Incomplete</option>
+              <option value="complete">Complete</option>
+            </select>
+          </label>
+        </div>
+        <p id="trackingListMeta" class="sub"></p>
+        <div id="adminTrackingList" class="admin-card-grid tracking-card-grid"></div>
+        <nav id="trackingPag" class="pagination hidden" aria-label="Tracking pages"></nav>
+      </div>
+      <div id="metadataGapsView" class="admin-section-view hidden admin-panel">
+        <h2>Metadata gaps</h2>
+        <p class="sub">Media library titles missing TMDB and/or poster. <b>Courses</b> are managed in <b>Course library</b> only. Tap <b>Fix TMDB</b> to pick a match inline.</p>
+        <div id="metadataGapsSummary" class="admin-stats metadata-gaps-summary"></div>
+        <div class="tracking-filters metadata-gaps-filters">
+          <button type="button" class="filter-btn active" data-metadata-filter="all">Any gap</button>
+          <button type="button" class="filter-btn" data-metadata-filter="no_tmdb">No TMDB id</button>
+          <button type="button" class="filter-btn" data-metadata-filter="no_poster">No poster</button>
+          <button type="button" class="filter-btn" data-metadata-filter="no_both">Both missing</button>
+        </div>
+        <p id="metadataGapsMeta" class="sub"></p>
+        <div id="metadataGapsList" class="metadata-gaps-list"></div>
+        <nav id="metadataGapsPag" class="pagination hidden" aria-label="Metadata gaps pages"></nav>
+      </div>
+      <div id="pipelineView" class="admin-section-view hidden admin-panel">
+        <h2>Upload pipeline</h2>
+        <p class="sub">Configure source channels, monitor jobs, and run end-to-end tests. Channel pickers for new targets are easiest in the Telegram bot (<b>Library setup → Pipeline upload targets</b>).</p>
+        <div id="pipelineStatusPanel" class="admin-section"></div>
+        <h3 class="admin-subhead">Default source channels</h3>
+        <div id="pipelineDefaultsList" class="admin-list"></div>
+        <h3 class="admin-subhead">Upload jobs</h3>
+        <div id="pipelineJobsList" class="admin-list"></div>
+        <h3 class="admin-subhead">Duplicate holds</h3>
+        <div id="pipelineDupesList" class="admin-list"></div>
+      </div>
+      <div id="filenameRulesView" class="admin-section-view hidden admin-panel">
+        <h2>Filename prefix rules</h2>
+        <p class="sub">Strip uploader or channel tags from filenames before title parsing and TMDB lookup. Include trailing spaces if the prefix has them (e.g. <code>[@Anime_RTX] </code>).</p>
+        <form id="filenameRuleForm" class="filename-rule-form admin-section">
+          <label class="field-label" for="filenameRulePattern">Prefix to strip</label>
+          <input type="text" id="filenameRulePattern" class="input" placeholder="[@Anime_RTX] " autocomplete="off" />
+          <label class="field-label" for="filenameRuleNote">Note (optional)</label>
+          <input type="text" id="filenameRuleNote" class="input" placeholder="Anime RTX channel tag" autocomplete="off" />
+          <label class="checkbox-row"><input type="checkbox" id="filenameRuleRegex" /> Regex (advanced)</label>
+          <button type="submit" class="btn primary btn-sm">Add rule</button>
+        </form>
+        <form id="filenameRulePreviewForm" class="filename-rule-form admin-section">
+          <label class="field-label" for="filenameRuleSample">Test filename</label>
+          <input type="text" id="filenameRuleSample" class="input" placeholder="[@Anime_RTX] 1129 One Piece [1080p].mkv" autocomplete="off" />
+          <button type="submit" class="btn secondary btn-sm">Preview parse</button>
+        </form>
+        <p id="filenameRulePreviewOut" class="sub hidden"></p>
+        <p id="filenameRulesMeta" class="sub"></p>
+        <div id="filenameRulesList" class="admin-list filename-rules-list"></div>
+      </div>
+      <div id="watchLibraryView" class="admin-section-view hidden admin-panel admin-panel--poster-grid">
+        <h2>Watch library</h2>
+        <p class="sub">Catalog slots in your library — published and unpublished.</p>
+        <div class="watch-lib-filters">
+          <button type="button" class="filter-btn active" data-watch-filter="all">All</button>
+          <button type="button" class="filter-btn" data-watch-filter="published">Published</button>
+          <button type="button" class="filter-btn" data-watch-filter="unpublished">Unpublished</button>
+        </div>
+        <div class="watch-lib-toolbar">
+          <p id="watchLibMeta" class="sub"></p>
+          <div class="watch-lib-filters-row">
+            <label class="sub">Sort
+              <select id="watchLibSort" class="input input-sm portal-select" aria-label="Sort by">
+                <option value="published_at">Published date</option>
+                <option value="title">Title</option>
+                <option value="year">Year</option>
+                <option value="rating">Rating</option>
+              </select>
+            </label>
+            <label class="sub">Order
+              <select id="watchLibOrder" class="input input-sm portal-select" aria-label="Sort order">
+                <option value="desc">High → low</option>
+                <option value="asc">Low → high</option>
+              </select>
+            </label>
+          </div>
+          <div class="watch-lib-actions">
+            <button type="button" class="btn secondary btn-sm" id="adminPublishAllBtn">Publish all</button>
+            <button type="button" class="btn primary btn-sm" id="adminPublishBtn">Publish next 10</button>
+          </div>
+        </div>
+        <p id="watchLibPublishStatus" class="sub hidden"></p>
+        <p id="adminCatalogUnpub" class="sub"></p>
+        <div id="watchLibGrid" class="grid"></div>
+        <nav id="watchLibPag" class="pagination hidden" aria-label="Watch library pages"></nav>
+      </div>
+    </main>
+    </div>
+    </div>
+  </div>
+  <div id="toast" class="toast hidden"></div>
+  <div id="playerOverlay" class="player-overlay hidden">
+    <button type="button" class="btn ghost player-close" id="playerClose" aria-label="Close">✕</button>
+    <p id="playerStatus" class="player-status hidden"></p>
+    <div id="playerProgressWrap" class="player-progress-wrap hidden">
+      <div class="player-progress-track"><div id="playerProgressBar" class="player-progress-bar"></div></div>
+      <p id="playerProgressLabel" class="player-progress-label"></p>
+    </div>
+    <video id="playerVideo" controls playsinline preload="metadata"></video>
+  </div>
+  <div id="sidebarBackdrop" class="sidebar-backdrop hidden" aria-hidden="true"></div>
+  <script src="/static/app.js?v=18"></script>
+  <script src="/static/admin.js?v=44"></script>
+</body>
+</html>

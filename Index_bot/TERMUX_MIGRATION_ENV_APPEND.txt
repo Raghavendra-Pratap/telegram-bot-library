@@ -1,0 +1,13 @@
+# Append these lines to `.env` on your Termux server.
+# Keep existing BOT_TOKEN/API_ID/API_HASH/TMDB values from your current setup.
+
+# Telethon locking protection
+TELETHON_GATEWAY_ENABLED=true
+TELETHON_PORTAL_SESSION=forward_ingest_portal.session
+
+# PostgreSQL (set after running scripts/setup_postgres_termux.sh)
+# DATABASE_URL=postgresql+psycopg://index_user:your_password@localhost:5432/index_bot
+
+# Optional Postgres pooling
+DB_POOL_SIZE=5
+DB_MAX_OVERFLOW=10

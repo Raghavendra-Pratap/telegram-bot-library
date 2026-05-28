@@ -14,7 +14,7 @@ import time
 from collections import defaultdict
 from typing import Any, Awaitable, Callable, TypeVar
 
-from telegram import Bot, InlineKeyboardMarkup
+from telegram import Bot, InlineKeyboardMarkup, InputMediaPhoto
 from telegram.constants import ParseMode
 from telegram.error import BadRequest, NetworkError, RetryAfter, TelegramError, TimedOut
 
@@ -458,6 +458,7 @@ async def flood_send_message(
     parse_mode=ParseMode.HTML,
     reply_markup: InlineKeyboardMarkup | None = None,
     disable_web_page_preview: bool = False,
+    reply_to_message_id: int | None = None,
 ):
     return await call_with_flood_retry(
         lambda: bot.send_message(
@@ -466,6 +467,7 @@ async def flood_send_message(
             parse_mode=parse_mode,
             reply_markup=reply_markup,
             disable_web_page_preview=disable_web_page_preview,
+            reply_to_message_id=reply_to_message_id,
         ),
         chat_id=chat_id,
         label="send_message",
@@ -509,6 +511,7 @@ async def flood_send_photo(
     caption: str | None = None,
     parse_mode=ParseMode.HTML,
     reply_markup: InlineKeyboardMarkup | None = None,
+    reply_to_message_id: int | None = None,
 ):
     return await call_with_flood_retry(
         lambda: bot.send_photo(
@@ -517,6 +520,7 @@ async def flood_send_photo(
             caption=caption,
             parse_mode=parse_mode,
             reply_markup=reply_markup,
+            reply_to_message_id=reply_to_message_id,
         ),
         chat_id=chat_id,
         label="send_photo",
@@ -542,6 +546,29 @@ async def flood_edit_message_caption(
         ),
         chat_id=chat_id,
         label="edit_message_caption",
+    )
+
+
+async def flood_edit_message_media(
+    bot: Bot,
+    chat_id: int | str,
+    message_id: int,
+    *,
+    photo: str,
+    caption: str,
+    parse_mode=ParseMode.HTML,
+    reply_markup: InlineKeyboardMarkup | None = None,
+) -> None:
+    media = InputMediaPhoto(media=photo, caption=caption, parse_mode=parse_mode)
+    await call_with_flood_retry(
+        lambda: bot.edit_message_media(
+            chat_id=chat_id,
+            message_id=message_id,
+            media=media,
+            reply_markup=reply_markup,
+        ),
+        chat_id=chat_id,
+        label="edit_message_media",
     )
 
 
