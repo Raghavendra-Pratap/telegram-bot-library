@@ -24,7 +24,7 @@ from dotenv import load_dotenv
 
 load_dotenv(_ROOT / ".env")
 
-from sqlalchemy import create_engine, inspect, select, text
+from sqlalchemy import BigInteger, create_engine, inspect, select, text
 from sqlalchemy.engine import Engine
 
 from config import Config
@@ -45,10 +45,11 @@ def _sqlite_col_abs_max(src: Engine, table_name: str, col_name: str) -> int:
         return 0
 
 
-def _prepare_postgres_schema(src: Engine, dst: Engine) -> None:
+def _prepare_postgres_schema(src: Engine, dst: Engine) -> dict[str, set[str]]:
     """Widen Postgres int columns to BIGINT when SQLite data exceeds int32."""
+    widened: dict[str, set[str]] = {}
     if dst.dialect.name != "postgresql":
-        return
+        return widened
     INT32_MAX = 2_147_483_647
     insp = inspect(dst)
     tables = set(insp.get_table_names())
@@ -82,7 +83,9 @@ def _prepare_postgres_schema(src: Engine, dst: Engine) -> None:
                             f'ALTER COLUMN "{col.name}" TYPE BIGINT'
                         )
                     )
+                    widened.setdefault(tname, set()).add(col.name)
                     print(f"  widened {tname}.{col.name} to BIGINT (abs_max={abs_max})")
+    return widened
 
 
 def _sqlite_url() -> str:
@@ -105,7 +108,12 @@ def _pg_url() -> str:
 
 def _copy_tables(src: Engine, dst: Engine) -> None:
     Base.metadata.create_all(dst)
-    _prepare_postgres_schema(src, dst)
+    widened = _prepare_postgres_schema(src, dst)
+    for table in Base.metadata.sorted_tables:
+        cols = widened.get(table.name) or set()
+        for col in table.columns:
+            if col.name in cols:
+                col.type = BigInteger()
     insp_dst = inspect(dst)
     existing = set(insp_dst.get_table_names())
 
