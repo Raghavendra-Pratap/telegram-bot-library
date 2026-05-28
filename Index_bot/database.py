@@ -885,6 +885,9 @@ class Database:
                 fcols = {c["name"] for c in insp.get_columns("file_uploads")}
                 if "library_visible" in fcols:
                     with self.engine.begin() as conn:
+                        library_true = (
+                            "1" if self.engine.dialect.name == "sqlite" else "TRUE"
+                        )
                         confirmed_cond = (
                             "is_confirmed = 1"
                             if self.engine.dialect.name == "sqlite"
@@ -894,12 +897,15 @@ class Database:
                             text(
                                 """
                                 UPDATE file_uploads
-                                SET library_visible = 1
+                                SET library_visible = {library_true}
                                 WHERE {confirmed_cond}
                                   AND content_title_id IN (
                                     SELECT id FROM movie_series WHERE tmdb_id IS NOT NULL
                                   )
-                                """.format(confirmed_cond=confirmed_cond)
+                                """.format(
+                                    confirmed_cond=confirmed_cond,
+                                    library_true=library_true,
+                                )
                             )
                         )
         except Exception as e:
