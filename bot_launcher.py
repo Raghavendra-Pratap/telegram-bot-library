@@ -282,6 +282,9 @@ class BotLauncher:
         if check_bots:
             print(f"\n{Colors.CYAN}Checking bot dependencies...{Colors.RESET}\n")
             for bot in check_bots:
+                if not self._launcher_manages_dependencies(bot):
+                    print(f"{Colors.GREEN}✅ {bot['name']}: Dependencies handled by startup script{Colors.RESET}")
+                    continue
                 bot_ok, missing_bot = self.check_bot_dependencies(bot)
                 if not bot_ok:
                     print(f"{Colors.YELLOW}⚠️  {bot['name']}: Missing {len(missing_bot)} dependencies: {', '.join(missing_bot[:5])}{'...' if len(missing_bot) > 5 else ''}{Colors.RESET}")
@@ -360,6 +363,10 @@ class BotLauncher:
         script = str(bot.get("script", "bot.py"))
         return "shell" if script.endswith(".sh") else "python"
 
+    def _launcher_manages_dependencies(self, bot: dict) -> bool:
+        """Startup scripts can opt out and self-manage dependency installation."""
+        return not bool(bot.get("manage_dependencies_in_script"))
+
     def _read_pid_file(self, path: Path) -> Optional[int]:
         if not path.exists():
             return None
@@ -417,7 +424,7 @@ class BotLauncher:
             print(f"{Colors.RED}❌ Stop script not found: {script_path}{Colors.RESET}")
             return False
         result = subprocess.run(
-            ["/bin/bash", str(script_path)],
+            ["bash", str(script_path)],
             cwd=str(bot_dir),
             capture_output=True,
             text=True,
@@ -493,17 +500,18 @@ class BotLauncher:
             print(f"{Colors.RED}❌ {bot_name}: {message}{Colors.RESET}")
             return None
         
-        # Check and install dependencies
-        bot_ok, missing_bot = self.check_bot_dependencies(bot)
-        if not bot_ok:
-            if auto_install:
-                print(f"{Colors.YELLOW}⚠️  {bot_name}: Missing dependencies, installing...{Colors.RESET}")
-                if not self.install_bot_dependencies(bot):
-                    print(f"{Colors.RED}❌ {bot_name}: Failed to install dependencies{Colors.RESET}")
+        # Check and install dependencies (unless startup script manages them).
+        if self._launcher_manages_dependencies(bot):
+            bot_ok, missing_bot = self.check_bot_dependencies(bot)
+            if not bot_ok:
+                if auto_install:
+                    print(f"{Colors.YELLOW}⚠️  {bot_name}: Missing dependencies, installing...{Colors.RESET}")
+                    if not self.install_bot_dependencies(bot):
+                        print(f"{Colors.RED}❌ {bot_name}: Failed to install dependencies{Colors.RESET}")
+                        return None
+                else:
+                    print(f"{Colors.RED}❌ {bot_name}: Missing dependencies: {', '.join(missing_bot)}{Colors.RESET}")
                     return None
-            else:
-                print(f"{Colors.RED}❌ {bot_name}: Missing dependencies: {', '.join(missing_bot)}{Colors.RESET}")
-                return None
         
         bot_dir = self.base_dir / bot['directory']
         python_exe = self._get_bot_venv_python(bot)
@@ -536,7 +544,7 @@ class BotLauncher:
             
             env = {**os.environ, 'PYTHONUNBUFFERED': '1'}
             if script_type == "shell":
-                cmd = ["/bin/bash", str(script_path)]
+                cmd = ["bash", str(script_path)]
             else:
                 cmd = [str(python_exe), str(script_path)]
 

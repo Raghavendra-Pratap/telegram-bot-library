@@ -26,7 +26,8 @@
       "pid_file": ".bot.pid",
       "script_type": "shell",
       "stack_launch": false,
-      "stop_script": "stop_bot.sh"
+      "stop_script": "stop_bot.sh",
+      "manage_dependencies_in_script": true
     }
   ],
   "dashboard": {
