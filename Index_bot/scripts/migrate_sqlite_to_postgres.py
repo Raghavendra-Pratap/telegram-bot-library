@@ -88,6 +88,30 @@ def _prepare_postgres_schema(src: Engine, dst: Engine) -> dict[str, set[str]]:
     return widened
 
 
+def _ordered_tables() -> list:
+    """Copy order that avoids FK cycles where possible."""
+    tables = list(Base.metadata.sorted_tables)
+    by_name = {t.name: t for t in tables}
+    preferred = [
+        "channels",
+        "movie_series",
+        "file_uploads",
+        "upload_jobs",
+        "upload_job_items",
+    ]
+    out = []
+    seen = set()
+    for name in preferred:
+        t = by_name.get(name)
+        if t is not None and t not in seen:
+            out.append(t)
+            seen.add(t)
+    for t in tables:
+        if t not in seen:
+            out.append(t)
+    return out
+
+
 def _sqlite_url() -> str:
     path = Path(Config.DB_PATH)
     if not path.is_absolute():
@@ -109,16 +133,17 @@ def _pg_url() -> str:
 def _copy_tables(src: Engine, dst: Engine) -> None:
     Base.metadata.create_all(dst)
     widened = _prepare_postgres_schema(src, dst)
-    for table in Base.metadata.sorted_tables:
+    for table in _ordered_tables():
         cols = widened.get(table.name) or set()
         for col in table.columns:
             if col.name in cols:
                 col.type = BigInteger()
     insp_dst = inspect(dst)
     existing = set(insp_dst.get_table_names())
+    deferred_upload_item_links: list[dict[str, int]] = []
 
     with src.connect() as sconn, dst.connect() as dconn:
-        for table in Base.metadata.sorted_tables:
+        for table in _ordered_tables():
             if table.name not in existing:
                 print(f"  skip {table.name} (not in destination schema)")
                 continue
@@ -126,12 +151,40 @@ def _copy_tables(src: Engine, dst: Engine) -> None:
             if not rows:
                 print(f"  {table.name}: 0 rows")
                 continue
+            if table.name == "file_uploads":
+                fixed_rows = []
+                for r in rows:
+                    rec = dict(r)
+                    link = rec.get("upload_job_item_id")
+                    if link is not None:
+                        deferred_upload_item_links.append(
+                            {"id": int(rec["id"]), "upload_job_item_id": int(link)}
+                        )
+                        rec["upload_job_item_id"] = None
+                    fixed_rows.append(rec)
+                rows_to_insert = fixed_rows
+            else:
+                rows_to_insert = [dict(r) for r in rows]
             dconn.execute(table.delete())
-            dconn.execute(table.insert(), [dict(r) for r in rows])
+            dconn.execute(table.insert(), rows_to_insert)
             dconn.commit()
             print(f"  {table.name}: {len(rows)} rows")
 
-        for table in Base.metadata.sorted_tables:
+        if deferred_upload_item_links:
+            dconn.execute(
+                text(
+                    """
+                    UPDATE file_uploads
+                    SET upload_job_item_id = :upload_job_item_id
+                    WHERE id = :id
+                    """
+                ),
+                deferred_upload_item_links,
+            )
+            dconn.commit()
+            print(f"  file_uploads.upload_job_item_id restored: {len(deferred_upload_item_links)}")
+
+        for table in _ordered_tables():
             if "id" not in table.c:
                 continue
             seq = dconn.execute(
