@@ -272,7 +272,7 @@ DASHBOARD_HTML = """
                             ${bot.status === 'running' ? `
                                 <div class="bot-info-item">
                                     <span class="bot-info-label">PID:</span>
-                                    <span class="bot-info-value">${bot.pid || 'N/A'}</span>
+                                    <span class="bot-info-value">${(bot.stack_pids && bot.stack_pids.length) ? bot.stack_pids.join(', ') : (bot.pid || 'N/A')}</span>
                                 </div>
                                 <div class="bot-info-item">
                                     <span class="bot-info-label">Uptime:</span>
@@ -385,40 +385,22 @@ def start_dashboard(launcher, host='0.0.0.0', port=5000, port_holder=None):
     def api_status():
         """Get status of all bots"""
         available_bots = launcher.get_available_bots()
-        running_bots = launcher.running_bots
         
         bots_data = []
         for bot in available_bots:
-            bot_id = bot['id']
-            bot_process = running_bots.get(bot_id)
-            
-            if bot_process and launcher.is_process_alive(bot_process):
-                # Bot is running
-                uptime = (datetime.now() - bot_process.start_time).total_seconds()
-                bots_data.append({
-                    'id': bot_id,
-                    'name': bot['name'],
-                    'description': bot.get('description', ''),
-                    'status': 'running',
-                    'pid': bot_process.pid,
-                    'port': bot_process.port,
-                    'uptime_seconds': uptime,
-                    'start_time': bot_process.start_time.isoformat(),
-                    'last_error': bot_process.last_error
-                })
-            else:
-                # Bot is stopped
-                bots_data.append({
-                    'id': bot_id,
-                    'name': bot['name'],
-                    'description': bot.get('description', ''),
-                    'status': 'stopped',
-                    'pid': None,
-                    'port': bot.get('port'),
-                    'uptime_seconds': 0,
-                    'start_time': None,
-                    'last_error': None
-                })
+            snap = launcher.get_bot_status_snapshot(bot)
+            bots_data.append({
+                'id': snap['id'],
+                'name': snap['name'],
+                'description': snap.get('description', ''),
+                'status': snap['status'],
+                'pid': snap.get('pid'),
+                'stack_pids': snap.get('stack_pids') or [],
+                'port': snap.get('port'),
+                'uptime_seconds': snap.get('uptime_seconds', 0),
+                'start_time': snap.get('start_time'),
+                'last_error': snap.get('last_error'),
+            })
         
         return jsonify({
             'total_bots': len(available_bots),

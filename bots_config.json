@@ -27,7 +27,8 @@
       "script_type": "shell",
       "stack_launch": true,
       "stack_pid_files": [
-        ".bot.pid"
+        ".bot.pid",
+        ".portal.pid"
       ],
       "stop_script": "stop_all.sh"
     }

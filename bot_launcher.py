@@ -46,8 +46,9 @@ class BotProcess:
     restart_count: int = 0
     last_error: Optional[str] = None
     log_file: Optional[Any] = None  # open file handle for logs/<bot_id>.log
-    stack_mode: bool = False  # started via run_all.sh (bot/portal run in background)
-    monitor_pid: Optional[int] = None  # PID to watch when stack_mode (from .bot.pid)
+    stack_mode: bool = False
+    monitor_pid: Optional[int] = None
+    stack_pids: Optional[List[int]] = None
 
 class BotLauncher:
     def __init__(self, config_path: str = "bots_config.json"):
@@ -353,7 +354,6 @@ class BotLauncher:
         return True, "OK"
 
     def _script_type(self, bot: dict) -> str:
-        """Return 'shell' or 'python' for how to run bot['script']."""
         explicit = bot.get("script_type")
         if explicit in ("shell", "python"):
             return explicit
@@ -375,21 +375,34 @@ class BotLauncher:
         except OSError:
             return False
 
+    def _stack_alive_pids(self, bot_dir: Path, pid_files: List[str]) -> List[int]:
+        alive: List[int] = []
+        for pf in pid_files:
+            pid = self._read_pid_file(bot_dir / pf)
+            if pid and self._pid_alive(pid):
+                alive.append(pid)
+        return alive
+
+    def _tail_file(self, path: Path, max_chars: int = 600) -> str:
+        if not path.exists():
+            return ""
+        try:
+            content = path.read_text(encoding="utf-8", errors="ignore")
+            return content[-max_chars:] if len(content) > max_chars else content
+        except OSError:
+            return ""
+
     def _verify_stack_running(
-        self, bot_dir: Path, pid_files: List[str]
-    ) -> Tuple[bool, str]:
-        """After run_all.sh, confirm expected PID files point at live processes."""
-        missing = []
-        for name in pid_files:
-            pid = self._read_pid_file(bot_dir / name)
-            if pid is None or not self._pid_alive(pid):
-                missing.append(name)
-        if missing:
-            return False, f"stack not running (check: {', '.join(missing)})"
-        return True, "OK"
+        self, bot: dict, bot_dir: Path, pid_files: List[str]
+    ) -> Tuple[bool, List[int], str]:
+        alive = self._stack_alive_pids(bot_dir, pid_files)
+        if alive:
+            return True, alive, "OK"
+        bot_log = bot_dir / "bot.log"
+        log_hint = self._tail_file(bot_log) or "No bot.log output yet."
+        return False, [], f"stack not running; {log_hint}"
 
     def is_process_alive(self, bot_process: BotProcess) -> bool:
-        """True if the bot (or stack primary) is still running."""
         if bot_process.stack_mode and bot_process.monitor_pid:
             return self._pid_alive(bot_process.monitor_pid)
         return bot_process.process.poll() is None
@@ -403,7 +416,6 @@ class BotLauncher:
         if not script_path.exists():
             print(f"{Colors.RED}❌ Stop script not found: {script_path}{Colors.RESET}")
             return False
-        print(f"{Colors.CYAN}Running {stop_script}...{Colors.RESET}")
         result = subprocess.run(
             ["/bin/bash", str(script_path)],
             cwd=str(bot_dir),
@@ -453,7 +465,7 @@ class BotLauncher:
         if not env_ok:
             return False, env_msg
 
-        # Stack launch (run_all.sh) manages existing PIDs; do not block here.
+        # For stack launchers (run_all.sh), script manages process lifecycle itself.
         if not bot.get("stack_launch"):
             pid_file = bot.get("pid_file")
             if pid_file:
@@ -499,7 +511,7 @@ class BotLauncher:
             print(f"{Colors.RED}❌ {bot_name}: Virtual environment or Python not found{Colors.RESET}")
             return None
         
-        script_path = bot_dir / bot["script"]
+        script_path = bot_dir / bot['script']
         stack_launch = bool(bot.get("stack_launch"))
         script_type = self._script_type(bot)
 
@@ -522,18 +534,19 @@ class BotLauncher:
             log_file.write(f"\n--- Started at {datetime.now().isoformat()} ---\n")
             log_file.flush()
             
-            env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+            env = {**os.environ, 'PYTHONUNBUFFERED': '1'}
             if script_type == "shell":
                 cmd = ["/bin/bash", str(script_path)]
             else:
                 cmd = [str(python_exe), str(script_path)]
 
+            # Start bot process; stdout/stderr go to launcher log file
             process = subprocess.Popen(
                 cmd,
                 cwd=str(bot_dir),
                 stdout=log_file,
                 stderr=subprocess.STDOUT,
-                env=env,
+                env=env
             )
             
             wait_s = 5 if stack_launch else 2
@@ -541,20 +554,22 @@ class BotLauncher:
 
             stack_mode = False
             monitor_pid: Optional[int] = None
+            stack_pids: List[int] = []
             display_pid = process.pid
 
             if stack_launch:
                 pid_files = bot.get("stack_pid_files") or [".bot.pid"]
-                ok, err = self._verify_stack_running(bot_dir, pid_files)
+                ok, alive, err = self._verify_stack_running(bot, bot_dir, pid_files)
                 if not ok:
                     log_file.flush()
                     log_file.close()
                     print(f"{Colors.RED}❌ {bot_name} failed to start: {err}{Colors.RESET}")
-                    print(f"   See {log_path} and Index_bot/bot.log / portal.log")
+                    print(f"   See {log_path} and {bot_dir / 'bot.log'}")
                     return None
-                monitor_pid = self._read_pid_file(bot_dir / ".bot.pid")
-                display_pid = monitor_pid or display_pid
                 stack_mode = True
+                stack_pids = alive
+                monitor_pid = self._read_pid_file(bot_dir / ".bot.pid") or (alive[0] if alive else None)
+                display_pid = monitor_pid or display_pid
             elif process.poll() is not None:
                 log_file.flush()
                 try:
@@ -579,6 +594,7 @@ class BotLauncher:
                 log_file=log_file,
                 stack_mode=stack_mode,
                 monitor_pid=monitor_pid,
+                stack_pids=stack_pids or None
             )
             
             self.running_bots[bot_id] = bot_process
@@ -698,6 +714,56 @@ class BotLauncher:
                         print(f"{Colors.YELLOW}🔄 Auto-restarting {bot_process.bot_name}...{Colors.RESET}")
                         time.sleep(2)
                         self.start_bot(bot_config)
+
+    def get_bot_status_snapshot(self, bot: dict) -> Dict[str, Any]:
+        bot_id = bot["id"]
+        proc = self.running_bots.get(bot_id)
+        if proc and self.is_process_alive(proc):
+            uptime = (datetime.now() - proc.start_time).total_seconds()
+            return {
+                "id": bot_id,
+                "name": bot["name"],
+                "description": bot.get("description", ""),
+                "status": "running",
+                "pid": proc.pid,
+                "stack_pids": proc.stack_pids or ([] if not proc.monitor_pid else [proc.monitor_pid]),
+                "port": proc.port,
+                "uptime_seconds": uptime,
+                "start_time": proc.start_time.isoformat(),
+                "last_error": proc.last_error,
+            }
+
+        # Fallback: detect externally running stack via pid files/logs
+        if bot.get("stack_launch"):
+            bot_dir = self.base_dir / bot["directory"]
+            pid_files = bot.get("stack_pid_files") or [".bot.pid"]
+            alive = self._stack_alive_pids(bot_dir, pid_files)
+            if alive:
+                return {
+                    "id": bot_id,
+                    "name": bot["name"],
+                    "description": bot.get("description", ""),
+                    "status": "running",
+                    "pid": alive[0],
+                    "stack_pids": alive,
+                    "port": bot.get("port"),
+                    "uptime_seconds": 0,
+                    "start_time": None,
+                    "last_error": None,
+                }
+
+        return {
+            "id": bot_id,
+            "name": bot["name"],
+            "description": bot.get("description", ""),
+            "status": "stopped",
+            "pid": None,
+            "stack_pids": [],
+            "port": bot.get("port"),
+            "uptime_seconds": 0,
+            "start_time": None,
+            "last_error": None,
+        }
     
     def show_status(self):
         """Show status of all bots"""
