@@ -11,7 +11,16 @@ cd "${_INDEX_BOT_DIR}"
 
 ensure_index_bot_dependencies() {
   local req_file="${_INDEX_BOT_DIR}/requirements-all.txt"
-  local import_check="import telegram, sqlalchemy, telethon, dotenv, uvicorn, fastapi, tmdbv3api, regex"
+  local import_check="import telegram, sqlalchemy, telethon, dotenv, tmdbv3api, regex"
+  local termux_mode=""
+  if [[ -n "${PREFIX:-}" && "${PREFIX}" == *com.termux* ]]; then
+    termux_mode="1"
+  fi
+  local include_portal="${INDEX_BOT_INCLUDE_PORTAL_DEPS:-}"
+  include_portal="$(printf '%s' "${include_portal}" | tr '[:upper:]' '[:lower:]')"
+  if [[ -z "${termux_mode}" || "${include_portal}" == "1" || "${include_portal}" == "true" || "${include_portal}" == "yes" ]]; then
+    import_check="${import_check}, uvicorn, fastapi"
+  fi
   local db_url="${DATABASE_URL:-}"
   if [[ -z "${db_url}" && -f "${_INDEX_BOT_DIR}/.env" ]]; then
     if command -v rg >/dev/null 2>&1; then
@@ -23,8 +32,13 @@ ensure_index_bot_dependencies() {
   if [[ "${db_url,,}" == *postgres* ]]; then
     import_check="${import_check}, psycopg"
   fi
+  if [[ -n "${termux_mode}" && -z "${include_portal}" && -f "${_INDEX_ROOT_DIR}/requirements/bot-index-termux.txt" ]]; then
+    req_file="${_INDEX_ROOT_DIR}/requirements/bot-index-termux.txt"
+  fi
   if [[ ! -f "${req_file}" ]]; then
-    if [[ -f "${_INDEX_ROOT_DIR}/requirements/bot-index.txt" ]]; then
+    if [[ -n "${termux_mode}" && -z "${include_portal}" && -f "${_INDEX_ROOT_DIR}/requirements/bot-index-termux.txt" ]]; then
+      req_file="${_INDEX_ROOT_DIR}/requirements/bot-index-termux.txt"
+    elif [[ -f "${_INDEX_ROOT_DIR}/requirements/bot-index.txt" ]]; then
       req_file="${_INDEX_ROOT_DIR}/requirements/bot-index.txt"
     else
       req_file="${_INDEX_BOT_DIR}/requirements.txt"
