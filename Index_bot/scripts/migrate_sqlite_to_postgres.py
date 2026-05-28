@@ -31,6 +31,39 @@ from config import Config
 from database import Base
 
 
+def _prepare_postgres_schema(dst: Engine) -> None:
+    """Adjust integer width for known large-value columns before copy."""
+    if dst.dialect.name != "postgresql":
+        return
+    widen: dict[str, tuple[str, ...]] = {
+        "file_uploads": ("file_size", "message_id", "watch_message_id"),
+        "upload_job_items": ("file_size", "telegram_message_id"),
+    }
+    with dst.begin() as conn:
+        for table, cols in widen.items():
+            for col in cols:
+                conn.execute(
+                    text(
+                        f"""
+                        DO $$
+                        BEGIN
+                          IF EXISTS (
+                            SELECT 1
+                            FROM information_schema.columns
+                            WHERE table_schema = 'public'
+                              AND table_name = :table_name
+                              AND column_name = :column_name
+                              AND data_type IN ('integer', 'smallint')
+                          ) THEN
+                            EXECUTE 'ALTER TABLE public.{table} ALTER COLUMN {col} TYPE BIGINT';
+                          END IF;
+                        END $$;
+                        """
+                    ),
+                    {"table_name": table, "column_name": col},
+                )
+
+
 def _sqlite_url() -> str:
     path = Path(Config.DB_PATH)
     if not path.is_absolute():
@@ -51,6 +84,7 @@ def _pg_url() -> str:
 
 def _copy_tables(src: Engine, dst: Engine) -> None:
     Base.metadata.create_all(dst)
+    _prepare_postgres_schema(dst)
     insp_dst = inspect(dst)
     existing = set(insp_dst.get_table_names())
 
