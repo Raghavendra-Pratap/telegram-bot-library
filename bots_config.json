@@ -15,15 +15,21 @@
       "name": "Index Bot",
       "description": "Indexes channel uploads, TMDB metadata, search/library, watch catalog",
       "directory": "Index_bot",
-      "script": "bot.py",
+      "script": "run_all.sh",
       "venv_path": "../.venv",
-      "port": null,
+      "port": 8765,
       "enabled": true,
       "env_required": [
         "BOT_TOKEN",
         "ADMIN_USER_IDS"
       ],
-      "pid_file": ".bot.pid"
+      "pid_file": ".bot.pid",
+      "script_type": "shell",
+      "stack_launch": true,
+      "stack_pid_files": [
+        ".bot.pid"
+      ],
+      "stop_script": "stop_all.sh"
     }
   ],
   "dashboard": {

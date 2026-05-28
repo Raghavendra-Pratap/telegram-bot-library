@@ -46,6 +46,8 @@ class BotProcess:
     restart_count: int = 0
     last_error: Optional[str] = None
     log_file: Optional[Any] = None  # open file handle for logs/<bot_id>.log
+    stack_mode: bool = False  # started via run_all.sh (bot/portal run in background)
+    monitor_pid: Optional[int] = None  # PID to watch when stack_mode (from .bot.pid)
 
 class BotLauncher:
     def __init__(self, config_path: str = "bots_config.json"):
@@ -350,6 +352,69 @@ class BotLauncher:
             return False, f"Missing or empty in .env: {', '.join(missing)}"
         return True, "OK"
 
+    def _script_type(self, bot: dict) -> str:
+        """Return 'shell' or 'python' for how to run bot['script']."""
+        explicit = bot.get("script_type")
+        if explicit in ("shell", "python"):
+            return explicit
+        script = str(bot.get("script", "bot.py"))
+        return "shell" if script.endswith(".sh") else "python"
+
+    def _read_pid_file(self, path: Path) -> Optional[int]:
+        if not path.exists():
+            return None
+        try:
+            return int(path.read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
+            return None
+
+    def _pid_alive(self, pid: int) -> bool:
+        try:
+            os.kill(pid, 0)
+            return True
+        except OSError:
+            return False
+
+    def _verify_stack_running(
+        self, bot_dir: Path, pid_files: List[str]
+    ) -> Tuple[bool, str]:
+        """After run_all.sh, confirm expected PID files point at live processes."""
+        missing = []
+        for name in pid_files:
+            pid = self._read_pid_file(bot_dir / name)
+            if pid is None or not self._pid_alive(pid):
+                missing.append(name)
+        if missing:
+            return False, f"stack not running (check: {', '.join(missing)})"
+        return True, "OK"
+
+    def is_process_alive(self, bot_process: BotProcess) -> bool:
+        """True if the bot (or stack primary) is still running."""
+        if bot_process.stack_mode and bot_process.monitor_pid:
+            return self._pid_alive(bot_process.monitor_pid)
+        return bot_process.process.poll() is None
+
+    def _run_stop_script(self, bot: dict) -> bool:
+        stop_script = bot.get("stop_script")
+        if not stop_script:
+            return False
+        bot_dir = self.base_dir / bot["directory"]
+        script_path = bot_dir / stop_script
+        if not script_path.exists():
+            print(f"{Colors.RED}❌ Stop script not found: {script_path}{Colors.RESET}")
+            return False
+        print(f"{Colors.CYAN}Running {stop_script}...{Colors.RESET}")
+        result = subprocess.run(
+            ["/bin/bash", str(script_path)],
+            cwd=str(bot_dir),
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if result.returncode != 0 and result.stderr:
+            print(f"{Colors.YELLOW}{result.stderr.strip()}{Colors.RESET}")
+        return result.returncode == 0
+
     def _clear_stale_pid_file(self, bot_dir: Path, pid_file: str) -> Optional[str]:
         """Remove pid file if the process is gone. Return error message if still running."""
         path = bot_dir / pid_file
@@ -388,11 +453,13 @@ class BotLauncher:
         if not env_ok:
             return False, env_msg
 
-        pid_file = bot.get("pid_file")
-        if pid_file:
-            pid_err = self._clear_stale_pid_file(bot_dir, pid_file)
-            if pid_err:
-                return False, pid_err
+        # Stack launch (run_all.sh) manages existing PIDs; do not block here.
+        if not bot.get("stack_launch"):
+            pid_file = bot.get("pid_file")
+            if pid_file:
+                pid_err = self._clear_stale_pid_file(bot_dir, pid_file)
+                if pid_err:
+                    return False, pid_err
         
         return True, "OK"
     
@@ -404,7 +471,7 @@ class BotLauncher:
         # Check if already running
         if bot_id in self.running_bots:
             proc = self.running_bots[bot_id]
-            if proc.process.poll() is None:
+            if self.is_process_alive(proc):
                 print(f"{Colors.YELLOW}⚠️  {bot_name} is already running (PID: {proc.pid}){Colors.RESET}")
                 return proc
         
@@ -432,14 +499,17 @@ class BotLauncher:
             print(f"{Colors.RED}❌ {bot_name}: Virtual environment or Python not found{Colors.RESET}")
             return None
         
-        script_path = bot_dir / bot['script']
+        script_path = bot_dir / bot["script"]
+        stack_launch = bool(bot.get("stack_launch"))
+        script_type = self._script_type(bot)
 
-        pid_file = bot.get("pid_file")
-        if pid_file:
-            pid_err = self._clear_stale_pid_file(bot_dir, pid_file)
-            if pid_err:
-                print(f"{Colors.RED}❌ {bot_name}: {pid_err}{Colors.RESET}")
-                return None
+        if not stack_launch:
+            pid_file = bot.get("pid_file")
+            if pid_file:
+                pid_err = self._clear_stale_pid_file(bot_dir, pid_file)
+                if pid_err:
+                    print(f"{Colors.RED}❌ {bot_name}: {pid_err}{Colors.RESET}")
+                    return None
         
         print(f"{Colors.CYAN}🚀 Starting {bot_name}...{Colors.RESET}")
         
@@ -452,20 +522,40 @@ class BotLauncher:
             log_file.write(f"\n--- Started at {datetime.now().isoformat()} ---\n")
             log_file.flush()
             
-            # Start bot process; stdout/stderr go to log file
+            env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+            if script_type == "shell":
+                cmd = ["/bin/bash", str(script_path)]
+            else:
+                cmd = [str(python_exe), str(script_path)]
+
             process = subprocess.Popen(
-                [str(python_exe), str(script_path)],
+                cmd,
                 cwd=str(bot_dir),
                 stdout=log_file,
                 stderr=subprocess.STDOUT,
-                env={**os.environ, 'PYTHONUNBUFFERED': '1'}
+                env=env,
             )
             
-            # Wait a moment to check if it started successfully
-            time.sleep(2)
-            
-            if process.poll() is not None:
-                # Process exited immediately - show last lines from log
+            wait_s = 5 if stack_launch else 2
+            time.sleep(wait_s)
+
+            stack_mode = False
+            monitor_pid: Optional[int] = None
+            display_pid = process.pid
+
+            if stack_launch:
+                pid_files = bot.get("stack_pid_files") or [".bot.pid"]
+                ok, err = self._verify_stack_running(bot_dir, pid_files)
+                if not ok:
+                    log_file.flush()
+                    log_file.close()
+                    print(f"{Colors.RED}❌ {bot_name} failed to start: {err}{Colors.RESET}")
+                    print(f"   See {log_path} and Index_bot/bot.log / portal.log")
+                    return None
+                monitor_pid = self._read_pid_file(bot_dir / ".bot.pid")
+                display_pid = monitor_pid or display_pid
+                stack_mode = True
+            elif process.poll() is not None:
                 log_file.flush()
                 try:
                     with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
@@ -483,10 +573,12 @@ class BotLauncher:
                 bot_name=bot_name,
                 process=process,
                 start_time=datetime.now(),
-                pid=process.pid,
+                pid=display_pid,
                 port=bot.get('port'),
                 status="running",
-                log_file=log_file
+                log_file=log_file,
+                stack_mode=stack_mode,
+                monitor_pid=monitor_pid,
             )
             
             self.running_bots[bot_id] = bot_process
@@ -505,7 +597,12 @@ class BotLauncher:
     
     def stop_bot(self, bot_id: str) -> bool:
         """Stop a running bot"""
+        bot_config = next((b for b in self.config["bots"] if b["id"] == bot_id), None)
         if bot_id not in self.running_bots:
+            if bot_config and bot_config.get("stop_script"):
+                if self._run_stop_script(bot_config):
+                    print(f"{Colors.GREEN}✅ {bot_config['name']} stopped (via {bot_config['stop_script']}){Colors.RESET}")
+                    return True
             print(f"{Colors.YELLOW}⚠️  Bot {bot_id} is not running{Colors.RESET}")
             return False
         
@@ -515,6 +612,20 @@ class BotLauncher:
         print(f"{Colors.CYAN}🛑 Stopping {bot_process.bot_name}...{Colors.RESET}")
         
         try:
+            if bot_config and bot_config.get("stop_script"):
+                self._run_stop_script(bot_config)
+                uptime = (datetime.now() - bot_process.start_time).total_seconds()
+                self.stats[bot_id]["total_uptime"] += uptime
+                self.stats[bot_id]["stop_count"] += 1
+                if getattr(bot_process, "log_file", None) is not None:
+                    try:
+                        bot_process.log_file.close()
+                    except Exception:
+                        pass
+                del self.running_bots[bot_id]
+                print(f"{Colors.GREEN}✅ {bot_process.bot_name} stopped{Colors.RESET}")
+                return True
+
             # Try graceful shutdown
             process.terminate()
             
@@ -567,7 +678,7 @@ class BotLauncher:
             time.sleep(5)  # Check every 5 seconds
             
             for bot_id, bot_process in list(self.running_bots.items()):
-                if bot_process.process.poll() is not None:
+                if not self.is_process_alive(bot_process):
                     # Process has exited
                     print(f"{Colors.RED}⚠️  {bot_process.bot_name} crashed (PID: {bot_process.pid}). Check logs/{bot_id}.log{Colors.RESET}")
                     

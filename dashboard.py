@@ -392,7 +392,7 @@ def start_dashboard(launcher, host='0.0.0.0', port=5000, port_holder=None):
             bot_id = bot['id']
             bot_process = running_bots.get(bot_id)
             
-            if bot_process and bot_process.process.poll() is None:
+            if bot_process and launcher.is_process_alive(bot_process):
                 # Bot is running
                 uptime = (datetime.now() - bot_process.start_time).total_seconds()
                 bots_data.append({
