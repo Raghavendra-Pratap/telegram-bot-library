@@ -1,5 +1,5 @@
 """
-Twitter/X video downloader using yt-dlp
+TikTok video downloader using yt-dlp
 """
 import traceback
 import yt_dlp
@@ -13,8 +13,8 @@ from config import QUALITY_FORMAT
 logger = logging.getLogger(__name__)
 
 
-class TwitterDownloader(BaseDownloader):
-    """Downloader for Twitter/X videos"""
+class TikTokDownloader(BaseDownloader):
+    """Downloader for TikTok videos"""
 
     def _get_ydl_opts(
         self,
@@ -32,6 +32,8 @@ class TwitterDownloader(BaseDownloader):
             'no_warnings': False,
             'extractaudio': audio_only,
             'audioformat': 'mp3' if audio_only else None,
+            # TikTok sometimes returns watermarked streams; prefer non-watermarked
+            'extractor_args': {'tiktok': {'api_hostname': 'api22-normal-c-alisg.tiktokv.com'}},
         }
         if not audio_only:
             opts['postprocessors'] = [{'key': 'FFmpegVideoConvertor', 'preferedformat': 'mp4'}]
@@ -45,7 +47,7 @@ class TwitterDownloader(BaseDownloader):
         audio_only: bool = False,
         progress_callback=None,
     ) -> Optional[Path]:
-        """Download Twitter/X video."""
+        """Download TikTok video."""
         try:
             before_download = time.time()
             progress_hooks, postprocessor_hooks, get_final_path = self.make_ydl_hooks(progress_callback)
@@ -59,7 +61,7 @@ class TwitterDownloader(BaseDownloader):
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
                 video_id = info.get('id', '')
-                logger.info(f"Downloading Twitter video: {info.get('title', url)}")
+                logger.info(f"Downloading TikTok video: {info.get('title', url)}")
                 ydl.download([url])
 
             time.sleep(0.5)
@@ -67,11 +69,11 @@ class TwitterDownloader(BaseDownloader):
             if result:
                 logger.info(f"Downloaded: {result}")
                 return result
-            logger.error("Downloaded file not found")
+            logger.error("Downloaded TikTok file not found")
             return None
 
         except Exception as e:
-            logger.error(f"Error downloading Twitter video: {e}")
+            logger.error(f"Error downloading TikTok video: {e}")
             logger.error(traceback.format_exc())
             return None
 
@@ -80,12 +82,13 @@ class TwitterDownloader(BaseDownloader):
             with yt_dlp.YoutubeDL({'quiet': True, 'no_warnings': True}) as ydl:
                 info = ydl.extract_info(url, download=False)
                 return {
-                    'title': info.get('title', 'Unknown'),
+                    'title': info.get('title', 'TikTok Video'),
                     'duration': info.get('duration', 0),
-                    'uploader': info.get('uploader', 'Unknown'),
+                    'uploader': info.get('uploader') or info.get('creator', 'Unknown'),
+                    'view_count': info.get('view_count', 0),
                     'thumbnail': info.get('thumbnail', ''),
                     'url': url,
                 }
         except Exception as e:
-            logger.error(f"Error getting Twitter video info: {e}")
+            logger.error(f"Error getting TikTok video info: {e}")
             return None

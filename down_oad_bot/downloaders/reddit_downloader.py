@@ -1,6 +1,7 @@
 """
 Reddit video downloader using yt-dlp
 """
+import traceback
 import yt_dlp
 import time
 from pathlib import Path
@@ -14,26 +15,17 @@ logger = logging.getLogger(__name__)
 
 class RedditDownloader(BaseDownloader):
     """Downloader for Reddit videos"""
-    
+
     def _get_ydl_opts(
-        self, 
-        output_path: Path, 
+        self,
+        output_path: Path,
         quality: str = "best",
-        audio_only: bool = False
+        audio_only: bool = False,
     ) -> Dict[str, Any]:
-        """Get yt-dlp options"""
-        format_selector = QUALITY_FORMAT.get(quality, QUALITY_FORMAT["best"])
-        
-        if audio_only:
-            format_selector = "bestaudio/best"
-        
-        if audio_only:
-            output_template = str(output_path / "%(title)s.%(ext)s")
-        else:
-            # Convert to MP4 format for video files
-            output_template = str(output_path / "%(title)s.mp4")
-        
-        opts = {
+        format_selector = "bestaudio/best" if audio_only else QUALITY_FORMAT.get(quality, QUALITY_FORMAT["best"])
+        output_template = str(output_path / ("%(title)s.%(ext)s" if audio_only else "%(title)s.mp4"))
+
+        opts: Dict[str, Any] = {
             'format': format_selector,
             'outtmpl': output_template,
             'quiet': False,
@@ -41,71 +33,52 @@ class RedditDownloader(BaseDownloader):
             'extractaudio': audio_only,
             'audioformat': 'mp3' if audio_only else None,
         }
-        
-        # Convert to MP4 format for video files
         if not audio_only:
-            opts['postprocessors'] = [{
-                'key': 'FFmpegVideoConvertor',
-                'preferedformat': 'mp4',
-            }]
-        
-        # Remove None values
-        opts = {k: v for k, v in opts.items() if v is not None}
-        
-        return opts
-    
+            opts['postprocessors'] = [{'key': 'FFmpegVideoConvertor', 'preferedformat': 'mp4'}]
+
+        return {k: v for k, v in opts.items() if v is not None}
+
     def download(
-        self, 
-        url: str, 
+        self,
+        url: str,
         quality: str = "best",
-        audio_only: bool = False
+        audio_only: bool = False,
+        progress_callback=None,
     ) -> Optional[Path]:
-        """Download Reddit video"""
+        """Download Reddit video."""
         try:
             before_download = time.time()
-            
+            progress_hooks, postprocessor_hooks, get_final_path = self.make_ydl_hooks(progress_callback)
+            if progress_callback:
+                progress_callback("—", "metadata", "—")
+
             ydl_opts = self._get_ydl_opts(self.download_dir, quality, audio_only)
-            
+            ydl_opts['progress_hooks'] = progress_hooks
+            ydl_opts['postprocessor_hooks'] = postprocessor_hooks
+
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                # Get video info first
                 info = ydl.extract_info(url, download=False)
-                title = info.get('title', 'reddit_video')
                 video_id = info.get('id', '')
-                
-                # Download
-                logger.info(f"Downloading Reddit video: {title}")
+                logger.info(f"Downloading Reddit video: {info.get('title', url)}")
                 ydl.download([url])
-            
-            # Small delay to ensure file system has updated
+
             time.sleep(0.5)
-            
-            # Find the downloaded file
-            downloaded_file = self.find_downloaded_file(before_download, video_id)
-            
-            if downloaded_file and downloaded_file.exists():
-                logger.info(f"Downloaded: {downloaded_file}")
-                return downloaded_file
-            else:
-                logger.error("Downloaded file not found")
-                return None
-                    
+            result = get_final_path() or self.find_downloaded_file(before_download, video_id)
+            if result:
+                logger.info(f"Downloaded: {result}")
+                return result
+            logger.error("Downloaded file not found")
+            return None
+
         except Exception as e:
-            logger.error(f"Error downloading Reddit video: {str(e)}")
-            import traceback
+            logger.error(f"Error downloading Reddit video: {e}")
             logger.error(traceback.format_exc())
             return None
-    
+
     def get_video_info(self, url: str) -> Optional[Dict[str, Any]]:
-        """Get video information"""
         try:
-            ydl_opts = {
-                'quiet': True,
-                'no_warnings': True,
-            }
-            
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            with yt_dlp.YoutubeDL({'quiet': True, 'no_warnings': True}) as ydl:
                 info = ydl.extract_info(url, download=False)
-                
                 return {
                     'title': info.get('title', 'Unknown'),
                     'duration': info.get('duration', 0),
@@ -114,6 +87,5 @@ class RedditDownloader(BaseDownloader):
                     'url': url,
                 }
         except Exception as e:
-            logger.error(f"Error getting video info: {str(e)}")
+            logger.error(f"Error getting Reddit video info: {e}")
             return None
-

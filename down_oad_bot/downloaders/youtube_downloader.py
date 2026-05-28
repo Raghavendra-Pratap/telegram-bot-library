@@ -1,6 +1,7 @@
 """
 YouTube and YouTube Shorts downloader using yt-dlp
 """
+import traceback
 import yt_dlp
 from yt_dlp.utils import DownloadError
 import time
@@ -21,23 +22,38 @@ class YouTubeDownloader(BaseDownloader):
         super().__init__(download_dir)
         self.cookies_path = YOUTUBE_COOKIES_PATH if YOUTUBE_COOKIES_PATH else None
     
+    @staticmethod
+    def _quality_to_selector(quality: str) -> str:
+        """Convert a compact quality key (e.g. '1080p', '1080p60') to a yt-dlp format
+        selector.  Falls back gracefully for unknown values."""
+        if quality in QUALITY_FORMAT:
+            return QUALITY_FORMAT[quality]
+        # Raw selectors passed directly (legacy / fallback)
+        if '+' in quality or quality.startswith('best') or quality.isdigit():
+            return quality
+        # Dynamic: Xp or Xp60 patterns not yet in QUALITY_FORMAT
+        m = re.match(r'^(\d+)p(60)?$', quality)
+        if m:
+            h, hfr = int(m.group(1)), bool(m.group(2))
+            fps_clause = '[fps>50]' if hfr else '[fps<=55]'
+            return (
+                f"bestvideo[height<={h}]{fps_clause}+bestaudio"
+                f"/bestvideo[height<={h}]+bestaudio"
+            )
+        return QUALITY_FORMAT["best"]
+
     def _get_ydl_opts(
-        self, 
-        output_path: Path, 
+        self,
+        output_path: Path,
         quality: str = "best",
-        audio_only: bool = False
+        audio_only: bool = False,
     ) -> Dict[str, Any]:
         """Get yt-dlp options"""
         if audio_only:
             format_selector = "bestaudio/best"
             output_template = str(output_path / "%(title)s.%(ext)s")
         else:
-            # If quality is a format ID (like "399+251" or "best"), use it directly
-            # Otherwise use quality format mapping
-            if '+' in quality or quality.isdigit() or quality.startswith('best'):
-                format_selector = quality
-            else:
-                format_selector = QUALITY_FORMAT.get(quality, QUALITY_FORMAT["best"])
+            format_selector = self._quality_to_selector(quality)
             output_template = str(output_path / "%(title)s.%(ext)s")
         
         opts = {
@@ -78,72 +94,65 @@ class YouTubeDownloader(BaseDownloader):
         quality: str,
         audio_only: bool,
         before_download: float,
-        postprocessor_hook,
+        progress_hooks: list,
+        postprocessor_hooks: list,
+        get_final_path,
     ) -> Optional[Path]:
         """Perform one download attempt with given quality. Returns path or None."""
         ydl_opts = self._get_ydl_opts(self.download_dir, quality, audio_only)
-        ydl_opts['progress_hooks'] = [postprocessor_hook]
+        ydl_opts['progress_hooks'] = progress_hooks
+        ydl_opts['postprocessor_hooks'] = postprocessor_hooks
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
-            title = info.get('title', 'video')
             video_id = info.get('id', '')
-            logger.info(f"Downloading YouTube video: {title}")
+            logger.info(f"Downloading YouTube video: {info.get('title', 'video')}")
             ydl.download([url])
         time.sleep(0.5)
-        downloaded_file = self.find_downloaded_file(before_download, video_id)
-        return downloaded_file
-    
+        # Prefer the postprocessor-captured path; fall back to timestamp scan
+        return get_final_path() or self.find_downloaded_file(before_download, video_id)
+
     def download(
-        self, 
-        url: str, 
+        self,
+        url: str,
         quality: str = "best",
-        audio_only: bool = False
+        audio_only: bool = False,
+        progress_callback=None,
     ) -> Optional[Path]:
-        """Download YouTube video. Falls back to 'best' if requested format is unavailable (e.g. YouTube SABR/403)."""
-        downloaded_filename = None
-        
-        def postprocessor_hook(d):
-            nonlocal downloaded_filename
-            if d['status'] == 'finished':
-                downloaded_filename = d.get('filename')
-                logger.info(f"Post-processed file: {downloaded_filename}")
-        
+        """Download YouTube video. Falls back to 'best' if the requested format is
+        unavailable (YouTube SABR / 403 restrictions)."""
+        progress_hooks, postprocessor_hooks, get_final_path = self.make_ydl_hooks(progress_callback)
         before_download = time.time()
-        
+        # yt-dlp does not emit progress during extract_info; ping UI early for parallel clarity
+        if progress_callback:
+            progress_callback("—", "metadata", "—")
+
         for attempt_quality in (quality, "best"):
             try:
                 result = self._do_download(
-                    url, attempt_quality, audio_only, before_download, postprocessor_hook
+                    url, attempt_quality, audio_only,
+                    before_download, progress_hooks, postprocessor_hooks, get_final_path,
                 )
                 if result:
-                    if downloaded_filename and Path(downloaded_filename).exists():
-                        return Path(downloaded_filename)
                     return result
                 if attempt_quality == "best":
                     break
             except DownloadError as e:
                 msg = str(e).lower()
-                if "requested format is not available" in msg or "format is not available" in msg:
-                    if attempt_quality != "best":
-                        logger.warning(
-                            f"Requested format {quality} not available (YouTube may have restricted it). "
-                            "Retrying with best available."
-                        )
-                        continue
-                logger.error(f"Error downloading YouTube video: {e}")
-                import traceback
+                if ("requested format is not available" in msg or "format is not available" in msg) \
+                        and attempt_quality != "best":
+                    logger.warning(
+                        f"Format {quality} unavailable, retrying with best available."
+                    )
+                    continue
+                logger.error(f"YouTube download error: {e}")
                 logger.error(traceback.format_exc())
                 return None
             except Exception as e:
-                logger.error(f"Error downloading YouTube video: {e}")
-                import traceback
+                logger.error(f"YouTube download error: {e}")
                 logger.error(traceback.format_exc())
                 return None
-        
-        if downloaded_filename and Path(downloaded_filename).exists():
-            return Path(downloaded_filename)
-        logger.error("Downloaded file not found after all methods")
-        logger.error(f"Download directory contents: {list(self.download_dir.glob('*'))}")
+
+        logger.error("Downloaded file not found after all attempts")
         return None
     
     def get_video_info(self, url: str) -> Optional[Dict[str, Any]]:
@@ -259,18 +268,27 @@ class YouTubeDownloader(BaseDownloader):
             # Get yt-dlp options with playlist folder as output
             ydl_opts = self._get_ydl_opts(playlist_folder, quality, audio_only)
             
-            # Track downloaded files
-            downloaded_filenames = []
-            
-            def postprocessor_hook(d):
-                """Hook to capture downloaded filenames"""
-                if d['status'] == 'finished':
-                    filename = d.get('filename')
-                    if filename:
-                        downloaded_filenames.append(filename)
-                        logger.info(f"Downloaded: {Path(filename).name}")
-            
-            ydl_opts['progress_hooks'] = [postprocessor_hook]
+            # Track downloaded files via postprocessor hook (captures post-FFmpeg paths)
+            downloaded_filenames: list[str] = []
+
+            def _pp_hook(d: dict) -> None:
+                if d.get("status") == "finished":
+                    info = d.get("info_dict", {})
+                    fp = info.get("filepath") or info.get("filename")
+                    if fp:
+                        downloaded_filenames.append(fp)
+                        logger.info(f"Downloaded: {Path(fp).name}")
+
+            def _prog_hook(d: dict) -> None:
+                if d["status"] == "finished" and not any(
+                    f == d.get("filename") for f in downloaded_filenames
+                ):
+                    fn = d.get("filename")
+                    if fn:
+                        downloaded_filenames.append(fn)
+
+            ydl_opts['progress_hooks'] = [_prog_hook]
+            ydl_opts['postprocessor_hooks'] = [_pp_hook]
             
             before_download = time.time()
             
@@ -307,52 +325,87 @@ class YouTubeDownloader(BaseDownloader):
             
         except Exception as e:
             logger.error(f"Error downloading playlist: {str(e)}")
-            import traceback
             logger.error(traceback.format_exc())
             return downloaded_files
     
     def _parse_formats(self, formats: list) -> list:
-        """Parse yt-dlp formats to get available resolutions with file sizes"""
-        video_formats = []
-        seen_resolutions = set()
-        
+        """Return all distinct (height, fps-tier) options with accurate total size.
+
+        Key fixes vs. previous version:
+        - Deduplicates by (height, is_hfr) so 1080p@30 and 1080p@60 appear separately.
+        - Total size = best video stream size + best audio stream size.
+          YouTube DASH separates video and audio; showing video-only size was
+          consistently 15–30% lower than the file you'd actually receive.
+        - format_id is a compact key ("1080p60") that maps through QUALITY_FORMAT
+          in _get_ydl_opts, keeping callback data well under Telegram's 64-byte limit.
+        """
+        if not formats:
+            return [{'format_id': 'best', 'resolution': 'Best', 'height': 9999,
+                     'filesize': 0, 'fps': None}]
+
+        # ── Best audio size (added to every video estimate) ──────────────────
+        best_audio_size = max(
+            (f.get('filesize') or f.get('filesize_approx') or 0
+             for f in formats
+             if f.get('vcodec', 'none') == 'none' and f.get('acodec', 'none') != 'none'),
+            default=0,
+        )
+
+        # ── Collect video streams, group by (height, is_hfr) ─────────────────
+        # is_hfr: fps > 50  (covers 60 fps, 50 fps YouTube streams)
+        # Within each bucket keep the stream with the largest known size
+        # (larger size = higher bitrate = better quality indicator).
+        buckets: dict[tuple[int, bool], dict] = {}
+
         for fmt in formats:
-            # Only process video formats (not audio-only)
-            if fmt.get('vcodec') != 'none' and fmt.get('acodec') != 'none':
-                height = fmt.get('height')
-                filesize = fmt.get('filesize') or fmt.get('filesize_approx', 0)
-                
-                if height:
-                    resolution = f"{height}p"
-                    # Avoid duplicates, prefer formats with known file size
-                    if resolution not in seen_resolutions or filesize > 0:
-                        seen_resolutions.add(resolution)
-                        
-                        # Calculate total size (video + audio if separate)
-                        total_size = filesize
-                        
-                        video_formats.append({
-                            'format_id': fmt.get('format_id', ''),
-                            'resolution': resolution,
-                            'height': height,
-                            'filesize': total_size,
-                            'ext': fmt.get('ext', 'mp4'),
-                            'fps': fmt.get('fps'),
-                        })
-        
-        # Sort by resolution (height) descending
-        video_formats.sort(key=lambda x: x['height'], reverse=True)
-        
-        # Also add "best" option
-        best_size = sum(f.get('filesize', 0) for f in formats if f.get('filesize')) or 0
+            if fmt.get('vcodec', 'none') == 'none':
+                continue
+            height = fmt.get('height')
+            if not height:
+                continue
+            fps = fmt.get('fps') or 30
+            is_hfr = fps > 50
+            key = (height, is_hfr)
+
+            size = fmt.get('filesize') or fmt.get('filesize_approx') or 0
+            existing = buckets.get(key)
+            if existing is None or size > (existing.get('_video_size') or 0):
+                buckets[key] = {**fmt, '_video_size': size, '_is_hfr': is_hfr}
+
+        # ── Build result list ─────────────────────────────────────────────────
+        video_formats = []
+        for (height, is_hfr), fmt in buckets.items():
+            video_size = fmt.get('_video_size') or 0
+            total_size = (video_size + best_audio_size) if video_size > 0 else 0
+
+            fps_val = fmt.get('fps') or 30
+            fps_label = f"{round(fps_val)}fps" if is_hfr else ""
+            resolution = f"{height}p{fps_label}" if fps_label else f"{height}p"
+
+            # Compact key: "1080p60" or "1080p" — maps through _quality_to_selector
+            format_id = f"{height}p60" if is_hfr else f"{height}p"
+
+            video_formats.append({
+                'format_id': format_id,
+                'resolution': resolution,
+                'height': height,
+                'fps': round(fps_val) if is_hfr else None,
+                'filesize': total_size,  # video + audio combined estimate
+                'size_note': '~' if total_size == 0 else '',
+            })
+
+        # Sort: height desc, then hfr before non-hfr at the same height
+        video_formats.sort(key=lambda x: (x['height'], bool(x['fps'])), reverse=True)
+
+        # Prepend "Best" — no size shown since the actual stream depends on availability
         video_formats.insert(0, {
             'format_id': 'best',
             'resolution': 'Best',
             'height': 9999,
-            'filesize': best_size,
-            'ext': 'mp4',
             'fps': None,
+            'filesize': 0,
+            'size_note': '',
         })
-        
+
         return video_formats
 
