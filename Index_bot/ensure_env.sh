@@ -11,6 +11,14 @@ cd "${_INDEX_BOT_DIR}"
 
 ensure_index_bot_dependencies() {
   local req_file="${_INDEX_BOT_DIR}/requirements-all.txt"
+  local import_check="import telegram, sqlalchemy, telethon, dotenv, uvicorn, fastapi, tmdbv3api, regex"
+  local db_url="${DATABASE_URL:-}"
+  if [[ -z "${db_url}" && -f "${_INDEX_BOT_DIR}/.env" ]]; then
+    db_url="$(rg '^DATABASE_URL=' "${_INDEX_BOT_DIR}/.env" -n --no-heading 2>/dev/null | sed 's/^[0-9]*:DATABASE_URL=//')"
+  fi
+  if [[ "${db_url,,}" == *postgres* ]]; then
+    import_check="${import_check}, psycopg"
+  fi
   if [[ ! -f "${req_file}" ]]; then
     if [[ -f "${_INDEX_ROOT_DIR}/requirements/bot-index.txt" ]]; then
       req_file="${_INDEX_ROOT_DIR}/requirements/bot-index.txt"
@@ -27,7 +35,7 @@ ensure_index_bot_dependencies() {
     # shellcheck source=/dev/null
     source "${_INDEX_ROOT_DIR}/.venv/bin/activate"
 
-    if ! python -c "import telegram, sqlalchemy, telethon, dotenv, uvicorn, fastapi, tmdbv3api, regex, psycopg" 2>/dev/null; then
+    if ! python -c "${import_check}" 2>/dev/null; then
       echo "Installing Index_bot dependencies from ${req_file} ..."
       pip install --upgrade pip wheel
       pip install -r "${req_file}"
@@ -43,7 +51,7 @@ ensure_index_bot_dependencies() {
   # shellcheck source=/dev/null
   source "${_INDEX_BOT_DIR}/venv/bin/activate"
 
-  if ! python -c "import telegram, sqlalchemy, telethon, dotenv, uvicorn, fastapi, tmdbv3api, regex, psycopg" 2>/dev/null; then
+  if ! python -c "${import_check}" 2>/dev/null; then
     echo "Installing dependencies from ${req_file} ..."
     pip install --upgrade pip wheel
     pip install -r "${req_file}"
