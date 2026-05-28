@@ -9,6 +9,8 @@ PGDATA="${PGDATA:-$PREFIX/var/lib/postgresql}"
 PG_USER="${INDEX_PG_USER:-index_user}"
 PG_PASS="${INDEX_PG_PASS:-index_bot_local}"
 PG_DB="${INDEX_PG_DB:-index_bot}"
+ALLOW_LAN="${INDEX_PG_ALLOW_LAN:-true}"
+LAN_CIDR="${INDEX_PG_LAN_CIDR:-192.168.0.0/16}"
 
 echo "==> Installing PostgreSQL (Termux package, not Docker)"
 pkg install -y postgresql
@@ -23,6 +25,15 @@ if ! pg_ctl -D "$PGDATA" status >/dev/null 2>&1; then
   echo "==> Starting PostgreSQL"
   pg_ctl -D "$PGDATA" -l "$PGDATA/logfile" start
   sleep 2
+fi
+
+if [[ "${ALLOW_LAN,,}" == "1" || "${ALLOW_LAN,,}" == "true" || "${ALLOW_LAN,,}" == "yes" ]]; then
+  echo "==> Enabling LAN access (${LAN_CIDR})"
+  grep -q "listen_addresses='\\*'" "$PGDATA/postgresql.conf" 2>/dev/null || \
+    echo "listen_addresses='*'" >> "$PGDATA/postgresql.conf"
+  grep -q "host    all    all    ${LAN_CIDR}    md5" "$PGDATA/pg_hba.conf" 2>/dev/null || \
+    echo "host    all    all    ${LAN_CIDR}    md5" >> "$PGDATA/pg_hba.conf"
+  pg_ctl -D "$PGDATA" restart >/dev/null 2>&1 || true
 fi
 
 echo "==> Creating role and database (ignore errors if they already exist)"
