@@ -61,7 +61,27 @@ class TelethonGateway:
         api_id = int(os.getenv("API_ID", "").strip())
         api_hash = os.getenv("API_HASH", "").strip()
         self._client = TelegramClient(str(session), api_id, api_hash)
-        await self._client.start()
+        import sqlite3
+
+        last_err: BaseException | None = None
+        for attempt in range(8):
+            try:
+                await self._client.start()
+                last_err = None
+                break
+            except sqlite3.OperationalError as e:
+                last_err = e
+                if "database is locked" not in str(e).lower() or attempt >= 7:
+                    raise
+                logger.warning(
+                    "Telethon session locked (attempt %s/8) — "
+                    "stop portal/other Telethon clients using %s",
+                    attempt + 1,
+                    session.name,
+                )
+                await asyncio.sleep(min(2.0, 0.25 * (2**attempt)))
+        if last_err:
+            raise last_err
         if not await self._client.is_user_authorized():
             await self._client.disconnect()
             self._client = None

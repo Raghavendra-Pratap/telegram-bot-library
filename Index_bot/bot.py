@@ -7222,7 +7222,14 @@ async def post_init(application: Application) -> None:
     await start_job_queue(application)
     from telethon_gateway import start_telethon_gateway
 
-    await start_telethon_gateway()
+    try:
+        await start_telethon_gateway()
+    except Exception as e:
+        logger.error(
+            "Telethon gateway failed to start (%s) — uploads/routes use fallback sessions. "
+            "Run ./stop_all.sh if portal still holds forward_ingest.session.",
+            e,
+        )
     from channel_member_watch import start_member_watch_worker
 
     start_member_watch_worker(application)

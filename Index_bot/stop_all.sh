@@ -20,3 +20,10 @@ if [[ -f "${PORTAL_PIDFILE}" ]]; then
 else
   echo "⚠️  No .portal.pid file found"
 fi
+
+# Fallback: portal started without pidfile (or stale pidfile)
+while read -r pid; do
+  [[ -z "$pid" ]] && continue
+  kill "$pid" 2>/dev/null || kill -9 "$pid" 2>/dev/null || true
+  echo "✅ Stopped portal PID $pid (run_portal.py)"
+done < <(pgrep -f "${DIR}/run_portal.py" 2>/dev/null || true)

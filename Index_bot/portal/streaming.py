@@ -26,7 +26,9 @@ _client_lock = asyncio.Lock()
 
 
 def telethon_stream_ready() -> bool:
-    return telethon_configured() and telethon_session_path().exists()
+    from message_verify import telethon_portal_session_path
+
+    return telethon_configured() and telethon_portal_session_path().is_file()
 
 
 def can_stream_in_browser(upload) -> bool:

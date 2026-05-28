@@ -34,33 +34,13 @@ fi
 if [[ ! -f "${BOT_PIDFILE}" ]]; then
   echo "Starting bot..."
   nohup python bot.py >> "${DIR}/bot.log" 2>&1 &
-  BOT_PID=$!
-  sleep 3
-  if kill -0 "${BOT_PID}" 2>/dev/null; then
-    echo "${BOT_PID}" > "${BOT_PIDFILE}"
-  else
-    echo "❌ Bot did not stay up (see bot.log — often 409 Conflict or missing .env)"
-    rm -f "${BOT_PIDFILE}"
-    exit 1
-  fi
+  # bot.py writes .bot.pid after it acquires the single-instance lock (do not echo $! here)
 fi
 
 if [[ ! -f "${PORTAL_PIDFILE}" ]]; then
   echo "Starting portal..."
   nohup python run_portal.py >> "${DIR}/portal.log" 2>&1 &
-  PORTAL_PID=$!
-  sleep 2
-  if kill -0 "${PORTAL_PID}" 2>/dev/null; then
-    echo "${PORTAL_PID}" > "${PORTAL_PIDFILE}"
-  else
-    echo "⚠️  Portal did not stay up (see portal.log; port may be in use)"
-    rm -f "${PORTAL_PIDFILE}"
-  fi
-elif [[ -f "${PORTAL_PIDFILE}" ]]; then
-  PORTAL_PID="$(tr -d '[:space:]' < "${PORTAL_PIDFILE}" || true)"
-  if [[ -n "${PORTAL_PID}" ]] && ! kill -0 "${PORTAL_PID}" 2>/dev/null; then
-    rm -f "${PORTAL_PIDFILE}"
-  fi
+  echo $! > "${PORTAL_PIDFILE}"
 fi
 
 echo ""
