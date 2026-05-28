@@ -42,26 +42,22 @@ def _prepare_postgres_schema(dst: Engine) -> None:
     with dst.begin() as conn:
         for table, cols in widen.items():
             for col in cols:
-                conn.execute(
+                dtype = conn.execute(
                     text(
-                        f"""
-                        DO $$
-                        BEGIN
-                          IF EXISTS (
-                            SELECT 1
-                            FROM information_schema.columns
-                            WHERE table_schema = 'public'
-                              AND table_name = :table_name
-                              AND column_name = :column_name
-                              AND data_type IN ('integer', 'smallint')
-                          ) THEN
-                            EXECUTE 'ALTER TABLE public.{table} ALTER COLUMN {col} TYPE BIGINT';
-                          END IF;
-                        END $$;
+                        """
+                        SELECT data_type
+                        FROM information_schema.columns
+                        WHERE table_schema = 'public'
+                          AND table_name = :table_name
+                          AND column_name = :column_name
                         """
                     ),
                     {"table_name": table, "column_name": col},
-                )
+                ).scalar()
+                if dtype in ("integer", "smallint"):
+                    conn.execute(
+                        text(f"ALTER TABLE public.{table} ALTER COLUMN {col} TYPE BIGINT")
+                    )
 
 
 def _sqlite_url() -> str:
