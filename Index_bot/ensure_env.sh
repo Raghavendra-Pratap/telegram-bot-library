@@ -14,7 +14,11 @@ ensure_index_bot_dependencies() {
   local import_check="import telegram, sqlalchemy, telethon, dotenv, uvicorn, fastapi, tmdbv3api, regex"
   local db_url="${DATABASE_URL:-}"
   if [[ -z "${db_url}" && -f "${_INDEX_BOT_DIR}/.env" ]]; then
-    db_url="$(rg '^DATABASE_URL=' "${_INDEX_BOT_DIR}/.env" -n --no-heading 2>/dev/null | sed 's/^[0-9]*:DATABASE_URL=//')"
+    if command -v rg >/dev/null 2>&1; then
+      db_url="$(rg '^DATABASE_URL=' "${_INDEX_BOT_DIR}/.env" -n --no-heading 2>/dev/null | sed 's/^[0-9]*:DATABASE_URL=//')"
+    else
+      db_url="$(grep -E '^DATABASE_URL=' "${_INDEX_BOT_DIR}/.env" 2>/dev/null | sed 's/^DATABASE_URL=//')"
+    fi
   fi
   if [[ "${db_url,,}" == *postgres* ]]; then
     import_check="${import_check}, psycopg"
