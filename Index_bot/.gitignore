@@ -5,8 +5,13 @@
 *.session
 *.session-journal
 
+# Portal ffmpeg transcode cache (MKV → MP4)
+portal_transcode_cache/
+
 # Database
 *.db
+*.db-shm
+*.db-wal
 *.sqlite
 *.sqlite3
 

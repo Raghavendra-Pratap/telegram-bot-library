@@ -1,95 +1,102 @@
-# Telegram Bot Library - Index Bot
+# Index Bot
 
-A Telegram bot that indexes files from channels, extracts movie/series names, and provides search functionality.
+Telegram bot that indexes channel files, matches titles (TMDB), powers a **watch portal**, and runs a **bulk upload pipeline** (courses, media, archives).
 
-> **Branch status:** Under development. Available on `development` branch only.
+> Under active development on the `development` branch.
 
-## Features
+## What it does
 
-- **Channel Monitoring**: Automatically fetches and indexes all file names from specified Telegram channels
-- **Smart Name Extraction**: Parses file names to extract correct movie/series titles using advanced pattern matching
-- **Auto-Confirmation**: Files with high-confidence parsed names are automatically confirmed
-- **Search Functionality**: Search for movies/series across all monitored channels
-- **Admin Confirmation**: For files that can't be automatically identified, admins can confirm the correct name
-- **Upload Tracking**: Shows how many times a file/movie/series was uploaded across different channels
-- **Library View**: Display all uploads of the same movie/series with locations and timestamps
-- **Historical ingest**: `forward_ingest.py` (Telethon) batch-forwards old posts into an ingest channel so the bot can index them (bots cannot read chat history directly)
+- Monitors Telegram channels and indexes documents / video / audio
+- Parses filenames → movies, series, courses; TMDB metadata when configured
+- Admin pending queue, duplicates, content lanes, pipeline routing
+- **Upload pipeline** — plan batches from folder/CSV/paths, upload to target channels via Telethon
+- **Watch portal** — browse library, play in browser, admin catalog tools ([WATCH_PORTAL.md](./WATCH_PORTAL.md))
 
-## Setup
+## Quick start
 
-Same flow as **name-bot**: shared root `.venv`, `install_deps.sh`, optional launcher auto-install.
-
-See **[LOCAL_SERVER_GUIDE.md](./LOCAL_SERVER_GUIDE.md)** for the recommended setup.
-
-1. Install dependencies (from repo root):
-```bash
-./scripts/setup_env.sh
-./scripts/install_deps.sh index
-source .venv/bin/activate
-```
-
-2. Create a `.env` file from the sample (or run `python create_env.py`):
 ```bash
 cd Index_bot
-cp .env.example .env
-# Edit .env — see .env.example for every variable and placeholder format
+cp .env.example .env   # edit BOT_TOKEN, ADMIN_USER_IDS
+./run_all.sh           # installs deps if needed, starts bot + portal
 ```
 
-3. Add your bot to the channels you want to monitor (as admin with read permissions)
+Foreground bot only: `./run_bot.sh`  
+Stop stack: `./stop_all.sh`
 
-4. Run the bot:
-```bash
-cd Index_bot
-python bot.py
-# or: ./run_bot.sh   (auto-installs missing deps like the launcher)
-# or from repo root: python bot_launcher.py → Index Bot
-```
+Verify: `python check_readiness.py`
 
-## Usage
+Full setup: [HOW_TO_RUN.md](./HOW_TO_RUN.md) · Phone server: [TERMUX_SETUP.md](./TERMUX_SETUP.md)
 
-### User Commands
-- `/start` - Start the bot and see available commands
-- `/search <movie_name>` - Search for a movie/series across all channels
-- `/library <movie_name>` - View detailed library information for a movie/series (shows all uploads with timestamps)
-- `/list_channels` - List all monitored channels
-- `/stats` - View indexing statistics
+## Deployment options
 
-### Admin Commands
-- `/add_channel <channel_username>` - Add a channel to monitor
-- `/remove_channel <channel_username>` - Remove a channel from monitoring
-- `/backfill` - How to import **historical** uploads via `forward_ingest.py` (bots cannot read old messages)
-- `/pending` - View files pending admin confirmation
-- `/confirm <file_id> <correct_name>` - Confirm the correct name for a file
+| Mode | Where | Command |
+|------|-------|---------|
+| All-in-one | Termux / server | `./run_all.sh` |
+| Bot only | Any | `./run_bot.sh` |
+| Portal only | Any | `./run_portal.sh` |
+| Uploads from Mac paths | Mac + shared DB | `./run_upload_worker.sh` on Mac; bot on Termux |
 
-## Historical ingest (old uploads)
+**Split deploy (bot on phone, files on Mac):** shared `DATABASE_URL` (PostgreSQL recommended), Mac worker runs pipeline uploads from local paths. See [DEPLOYMENT.md](./DEPLOYMENT.md).
 
-1. Create an **ingest** channel and add Index_bot as **admin** (see **HOW_TO_RUN.md → Registering the ingest channel**).
-2. Optionally run `/add_channel @IngestChannel` so it appears in `/list_channels` before the first forward.
-2. Put **`API_ID`** and **`API_HASH`** in `.env` (same as for any Telethon client).
-3. With the bot running, execute from the `Index_bot` folder:
+## Dependencies
 
-   `python forward_ingest.py @SourceChannel @IngestChannel`
+- **Combined:** `requirements-all.txt` (bot + portal + Telethon + psycopg)
+- Monorepo: `../requirements/bot-index.txt` via `ensure_env.sh` / `run_*.sh`
 
-4. First run logs in your user account and creates a session file (see `HOW_TO_RUN.md`).
+## Configuration
 
-Forwards appear as new posts; the bot indexes **documents / video / audio** files the same way as live uploads.
+All variables: **`.env.example`** (copy to `.env`).
 
-## How It Works
+| Variable | Purpose |
+|----------|---------|
+| `BOT_TOKEN`, `ADMIN_USER_IDS` | Required for bot |
+| `DATABASE_URL` | Optional Postgres (shared DB for multi-machine) |
+| `API_ID`, `API_HASH` | Telethon (ingest, uploads, portal stream) |
+| `PORTAL_PUBLIC_URL` | Link in `/portal` command |
+| `TELETHON_GATEWAY_ENABLED` | Single queued Telethon client on bot (default on) |
+| `TELETHON_PORTAL_SESSION` | Separate session for portal streaming |
 
-1. **Adding Channels**: Add your bot as an admin to channels; they can auto-register when posts arrive, or use `/add_channel`
-2. **Automatic Indexing**: The bot indexes new **document / video / audio** channel posts in monitored channels
-3. **Name Parsing**: File names are parsed to extract movie/series titles, removing codecs, resolutions, release groups, etc.
-4. **Auto-Confirmation**: Files with high-confidence parsed names are automatically confirmed
-5. **Admin Review**: Files with low-confidence or unparseable names are flagged for admin confirmation
-6. **Search & Library**: Users can search for content and view detailed library information showing all uploads across channels
+## Documentation
+
+| Document | Description |
+|----------|-------------|
+| [DEPLOYMENT.md](./DEPLOYMENT.md) | Processes, Termux/Mac split, start/stop |
+| [HOW_TO_RUN.md](./HOW_TO_RUN.md) | Bot, env, historical ingest, workers |
+| [API_DOCS.md](./API_DOCS.md) | Portal REST API (+ `/docs` Swagger) |
+| [WATCH_PORTAL.md](./WATCH_PORTAL.md) | Portal setup and features |
+| [UPLOAD_PIPELINE.md](./UPLOAD_PIPELINE.md) | Bulk upload jobs and CSV |
+| [TERMUX_SETUP.md](./TERMUX_SETUP.md) | Complete Termux install guide |
+| [PIPELINE_E2E_TEST.md](./PIPELINE_E2E_TEST.md) | End-to-end test checklist |
+| [QUICKSTART.md](./QUICKSTART.md) | Minimal first-time setup |
+| [LOCAL_SERVER_GUIDE.md](./LOCAL_SERVER_GUIDE.md) | Monorepo / shared venv |
+
+## User commands (Telegram)
+
+- `/start`, `/menu` — main menu
+- `/search`, `/library`, `/watch`, `/portal`, `/favorites`, `/watchlist`
+- `/list_channels`, `/stats`
+
+## Admin (Telegram)
+
+- `/menu` → Upload pipeline, Watch hub, Library setup, pending TMDB, etc.
+- `/add_channel`, `/discover_channels`, `/backfill`
+- Historical import: `forward_ingest.py` ([HOW_TO_RUN.md](./HOW_TO_RUN.md))
 
 ## Database
 
-Data is stored in **SQLite** (`DB_PATH`, default `index_bot.db`) or in **PostgreSQL** if you set **`DATABASE_URL`** in `.env` (see `.env.example` and `HOW_TO_RUN.md`). Tables are created automatically on first run.
+SQLite (`DB_PATH`, default `index_bot.db`) or **PostgreSQL** (`DATABASE_URL`). Schema is created on first start.
 
-Stored entities include:
+Migrate SQLite → Postgres on Termux: `scripts/migrate_sqlite_to_postgres.py` ([TERMUX_SETUP.md §18](./TERMUX_SETUP.md)).
 
-- Channel information
-- File uploads with metadata
-- Movie/series names (confirmed and pending)
-- Upload history
+## Historical ingest
+
+Bots cannot read old channel history. Use Telethon to forward into an **ingest** channel:
+
+```bash
+python telethon_login.py
+python forward_ingest.py @SourceChannel @IngestChannel
+```
+
+## License / repo
+
+Part of **Telegram_Bot_Library**. Use repo-root `./scripts/install_deps.sh index` when working from the monorepo.

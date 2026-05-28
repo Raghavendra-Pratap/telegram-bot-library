@@ -393,7 +393,17 @@ You want: **“All checks passed! Bot is ready to run.”**
 
 ## 11. Start the bot (foreground test)
 
-First run in the **foreground** so you can see errors immediately.
+**Bot + portal together (background):**
+
+```bash
+cd ~/projects/Telegram_Bot_Library/Index_bot
+chmod +x run_all.sh stop_all.sh
+./run_all.sh
+```
+
+Logs: `bot.log`, `portal.log`. Stop: `./stop_all.sh`. See [DEPLOYMENT.md](./DEPLOYMENT.md).
+
+**Foreground bot only** (see errors immediately):
 
 ```bash
 cd ~/projects/Telegram_Bot_Library/Index_bot
@@ -630,22 +640,54 @@ Requires the same Telethon session as above.
 
 ---
 
-## 18. Optional: PostgreSQL instead of SQLite
+## 18. Optional: PostgreSQL instead of SQLite (no Docker)
 
-**Default on Termux:** SQLite via `DB_PATH=index_bot.db` — no extra services, best for most phones.
+**Default on Termux:** SQLite via `DB_PATH=index_bot.db` — no extra services.
 
-PostgreSQL on Termux is possible but heavy (`pkg install postgresql`). Only use it if you need concurrent heavy writes or remote DB access.
+Use **native PostgreSQL** when uploads, ingest, portal, and pipeline jobs hit `database is locked` on SQLite, or when bot + portal write at the same time. This project does **not** require Docker — only the Termux `postgresql` package.
 
-1. Install and initialize PostgreSQL in Termux (follow current Termux wiki for `postgresql`).
-2. Create database and user.
-3. In `.env`:
+### 18.1 Install and create DB
 
-   ```env
-   DATABASE_URL=postgresql+psycopg://index_user:your_password@localhost:5432/index_bot
-   ```
+```bash
+cd ~/projects/Telegram_Bot_Library/Index_bot
+chmod +x scripts/setup_postgres_termux.sh
+./scripts/setup_postgres_termux.sh
+```
 
-4. URL-encode special characters in passwords (`@`, `#`, etc.).
-5. Restart the bot; tables are created on first start.
+The script prints a `DATABASE_URL=postgresql+psycopg://...` line. Add it to `.env` (same value for bot and portal).
+
+Optional overrides before running the script:
+
+```bash
+export INDEX_PG_USER=index_user
+export INDEX_PG_PASS='your_strong_password'
+export INDEX_PG_DB=index_bot
+```
+
+URL-encode special characters in passwords (`@`, `#`, etc.) if you edit `.env` by hand.
+
+### 18.2 Migrate existing SQLite data
+
+**Stop the bot and portal first** (section 20).
+
+```bash
+source venv/bin/activate
+pip install 'psycopg[binary]>=3.1'
+python scripts/migrate_sqlite_to_postgres.py
+```
+
+Keep `index_bot.db` as a backup until you have verified uploads, pending queue, and portal admin.
+
+### 18.3 Telethon: two sessions (no lock between bot and portal)
+
+| Session file | Used by | Login command |
+|--------------|---------|----------------|
+| `forward_ingest.session` | Bot gateway (uploads, routes, member watch) | `python telethon_login.py` |
+| `forward_ingest_portal.session` (default) | Portal Play / streaming | `python telethon_login_portal.py` |
+
+Set `TELETHON_GATEWAY_ENABLED=true` (default) so the bot uses one shared Telethon client instead of many clones.
+
+Restart bot and portal after changing `.env` or sessions.
 
 ---
 

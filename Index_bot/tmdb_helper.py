@@ -173,6 +173,39 @@ def poster_image_url(s: dict, *, size: str = "w342") -> str | None:
     return f"https://image.tmdb.org/t/p/{size}{pp}"
 
 
+def suggestion_has_poster_art(s: dict) -> bool:
+    """True when TMDB returned a poster image path."""
+    pp = s.get("poster_path")
+    if pp is None:
+        return False
+    s_pp = str(pp).strip()
+    return bool(s_pp) and s_pp.lower() not in ("null", "none")
+
+
+def sort_suggestions_poster_first(suggestions: list[dict]) -> list[dict]:
+    """Stable sort: results with poster art first; saved hints tie-break within each tier."""
+    indexed = list(enumerate(suggestions))
+    indexed.sort(
+        key=lambda t: (
+            0 if suggestion_has_poster_art(t[1]) else 1,
+            0 if t[1].get("from_hint") else 1,
+            t[0],
+        )
+    )
+    return [s for _, s in indexed]
+
+
+def best_poster_url(s: dict, *, size: str = "w342") -> str | None:
+    """Poster first, then backdrop if TMDB has no poster art."""
+    url = poster_image_url(s, size=size)
+    if url:
+        return url
+    bp = s.get("backdrop_path")
+    if bp:
+        return poster_image_url({"poster_path": bp}, size="w500")
+    return None
+
+
 def format_suggestion_card_caption(s: dict, index: int, *, overview_chars: int = 900) -> str:
     """Single suggestion card: title, year, rating, id, plot (for one Telegram message)."""
     kind = "Movie" if s.get("media_type") == "movie" else "TV series"
@@ -323,6 +356,23 @@ def titles_match(a: str, b: str) -> bool:
     return na == nb or na in nb or nb in na
 
 
+def _is_transient_network_error(exc: BaseException | str | None) -> bool:
+    msg = str(exc or "").lower()
+    return any(
+        m in msg
+        for m in (
+            "connection reset",
+            "timed out",
+            "timeout",
+            "connection refused",
+            "network is unreachable",
+            "errno 54",
+            "errno 60",
+            "broken pipe",
+        )
+    )
+
+
 class TMDBHelper:
     """Helper class for TMDB API operations"""
 
@@ -361,7 +411,8 @@ class TMDBHelper:
         params.setdefault("language", "en")
         url = f"https://api.themoviedb.org/3{path}?{urllib.parse.urlencode(params)}"
         last_err: Exception | None = None
-        for attempt in range(2):
+        max_attempts = 4
+        for attempt in range(max_attempts):
             try:
                 req = urllib.request.Request(
                     url,
@@ -370,7 +421,7 @@ class TMDBHelper:
                         "User-Agent": "IndexBot/1.0 (+https://github.com)",
                     },
                 )
-                with urllib.request.urlopen(req, timeout=8) as resp:
+                with urllib.request.urlopen(req, timeout=12) as resp:
                     self._last_api_error = None
                     return json.loads(resp.read().decode())
             except urllib.error.HTTPError as e:
@@ -381,11 +432,21 @@ class TMDBHelper:
             except Exception as e:
                 last_err = e
                 self._last_api_error = str(e)
-                if attempt < 1:
-                    time.sleep(0.35)
+                if attempt < max_attempts - 1 and _is_transient_network_error(e):
+                    time.sleep(min(4.0, 0.5 * (2**attempt)))
                     continue
+                break
         logger.error("TMDB request %s failed after retries: %s", path, last_err)
         return None
+
+    def ping(self) -> dict[str, Any]:
+        """Quick connectivity check for portal health / diagnostics."""
+        if not self.enabled:
+            return {"ok": False, "error": "TMDB_API_KEY not configured"}
+        data = self._api_get("/configuration")
+        if data:
+            return {"ok": True}
+        return {"ok": False, "error": self._last_api_error or "unknown error"}
 
     def _parse_search_results(
         self, payload: dict | None, media_type: str, *, limit: int = 8
@@ -440,6 +501,137 @@ class TMDBHelper:
         data = self._api_get("/search/tv", **params)
         return self._parse_search_results(data if isinstance(data, dict) else None, "tv", limit=limit)
 
+    def _search_media_suggestions_page(
+        self,
+        path: str,
+        media_type: str,
+        name: str,
+        year: int | None,
+        page: int,
+    ) -> tuple[list[dict], int]:
+        """One TMDB search page (up to 20 results)."""
+        if not self.enabled or not name:
+            return [], 1
+        params: dict[str, Any] = {
+            "query": name,
+            "page": max(1, int(page)),
+            "include_adult": "false",
+        }
+        if media_type == "movie" and year:
+            params["year"] = year
+        elif media_type == "tv" and year:
+            params["first_air_date_year"] = year
+        data = self._api_get(path, **params)
+        if not isinstance(data, dict):
+            return [], 1
+        items = self._parse_search_results(data, media_type, limit=20)
+        total_pages = max(1, int(data.get("total_pages") or 1))
+        return items, total_pages
+
+    def _collect_pick_stream(
+        self,
+        query: str,
+        *,
+        filter_type: str = "all",
+        year: int | None = None,
+        max_items: int,
+    ) -> list[dict]:
+        """Walk TMDB search pages (TV + movie) until max_items unique suggestions."""
+        if not self.enabled or not query or max_items <= 0:
+            return []
+        clean_query, embedded_year = split_title_year(query)
+        query = clean_query or query
+        if embedded_year is not None and year is None:
+            year = embedded_year
+        ft = (filter_type or "all").lower()
+        if ft not in ("all", "tv", "movie"):
+            ft = "all"
+        seen: set[tuple] = set()
+        out: list[dict] = []
+        variants = title_search_variants(query) or [query]
+
+        for variant in variants:
+            tv_page = movie_page = 1
+            tv_total = movie_total = 1
+            tv_exhausted = movie_exhausted = False
+            while len(out) < max_items and not (tv_exhausted and movie_exhausted):
+                progressed = False
+                if ft in ("all", "tv") and not tv_exhausted:
+                    items, tv_total = self._search_media_suggestions_page(
+                        "/search/tv", "tv", variant, year, tv_page
+                    )
+                    tv_page += 1
+                    if tv_page > tv_total:
+                        tv_exhausted = True
+                    for item in items:
+                        key = (item.get("media_type"), item.get("tmdb_id"))
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        out.append(item)
+                        progressed = True
+                        if len(out) >= max_items:
+                            return out
+                if ft in ("all", "movie") and not movie_exhausted:
+                    items, movie_total = self._search_media_suggestions_page(
+                        "/search/movie", "movie", variant, year, movie_page
+                    )
+                    movie_page += 1
+                    if movie_page > movie_total:
+                        movie_exhausted = True
+                    for item in items:
+                        key = (item.get("media_type"), item.get("tmdb_id"))
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        out.append(item)
+                        progressed = True
+                        if len(out) >= max_items:
+                            return out
+                if not progressed and tv_exhausted and movie_exhausted:
+                    break
+            if out:
+                break
+        return sort_suggestions_poster_first(out)
+
+    def search_pick_page(
+        self,
+        query: str,
+        *,
+        page: int = 1,
+        per_page: int | None = None,
+        filter_type: str = "all",
+        media_type: str | None = None,
+        year: int | None = None,
+    ) -> dict[str, Any]:
+        """
+        Paginated TMDB results for manual pick UI (portal + bot load-more).
+
+        Returns one page of suggestions plus has_more for a Load more control.
+        """
+        from config import Config
+
+        per_page = max(1, int(per_page or Config.TMDB_PICK_PAGE_SIZE))
+        page = max(1, int(page))
+        end = page * per_page
+        stream = self._collect_pick_stream(
+            query,
+            filter_type=filter_type,
+            year=year,
+            max_items=end + 1,
+        )
+        start = end - per_page
+        items = sort_suggestions_poster_first(stream[start:end])
+        has_more = len(stream) > end
+        return {
+            "items": items,
+            "page": page,
+            "per_page": per_page,
+            "has_more": has_more,
+            "next_page": page + 1 if has_more else None,
+            "filter_type": (filter_type or "all").lower(),
+        }
+
     def search_suggestions_multi(
         self,
         query: str,
@@ -465,8 +657,10 @@ class TMDBHelper:
                 return self.search_tv_suggestions(variant, yr, limit=limit)
             if mt == "movie":
                 return self.search_movie_suggestions(variant, yr, limit=limit)
-            batch = self.search_movie_suggestions(variant, yr, limit=limit)
-            return batch or self.search_tv_suggestions(variant, yr, limit=limit)
+            half = max(4, limit // 2)
+            movies = self.search_movie_suggestions(variant, yr, limit=half)
+            tv = self.search_tv_suggestions(variant, yr, limit=half)
+            return self._merge_suggestion_lists(movies, tv, limit=limit)
 
         def _merge(batch: list[dict]) -> bool:
             for item in batch:
@@ -479,11 +673,17 @@ class TMDBHelper:
                     return True
             return False
 
+        stop_search = False
         for variant in title_search_variants(query):
+            if stop_search:
+                break
             years = [year, None] if year else [None]
             for yr in years:
                 batch = _fetch(variant, yr)
-                if self._last_api_error and not batch:
+                if not batch and self._last_api_error:
+                    if not merged and _is_transient_network_error(self._last_api_error):
+                        stop_search = True
+                        break
                     continue
                 if _merge(batch):
                     return merged[:limit]
@@ -491,27 +691,48 @@ class TMDBHelper:
                 break
         return merged[:limit]
 
+    def _merge_suggestion_lists(
+        self, *batches: list[dict], limit: int
+    ) -> list[dict]:
+        seen: set[tuple] = set()
+        merged: list[dict] = []
+        for batch in batches:
+            for item in batch or []:
+                key = (item.get("media_type"), item.get("tmdb_id"))
+                if key in seen:
+                    continue
+                seen.add(key)
+                merged.append(item)
+                if len(merged) >= limit:
+                    return merged
+        return merged
+
     def search_suggestions_for_pick(
         self,
         query: str,
         *,
         media_type: str | None = None,
         year: int | None = None,
-        limit: int = 6,
+        limit: int | None = None,
     ) -> list[dict]:
-        """Search with variants; try alternate movie/tv if the first pass is empty."""
-        mt = (media_type or "movie").lower()
-        if mt in ("series", "show"):
-            mt = "tv"
-        batch = self.search_suggestions_multi(
-            query, media_type=mt, year=year, limit=limit
+        """
+        Search for manual pick UI — merges preferred type + the other (e.g. TV + movies).
+
+        Avoids cases like "One Piece" where movie spin-offs fill all slots and the TV
+        series is missing.
+        """
+        from config import Config
+
+        lim = max(6, int(limit or Config.TMDB_PICK_SUGGESTION_LIMIT))
+        picked = self.search_pick_page(
+            query,
+            page=1,
+            per_page=lim,
+            filter_type="all",
+            media_type=media_type,
+            year=year,
         )
-        if batch:
-            return batch
-        alt = "movie" if mt == "tv" else "tv"
-        return self.search_suggestions_multi(
-            query, media_type=alt, year=year, limit=limit
-        )
+        return picked.get("items") or []
 
     def get_suggestions(
         self,
@@ -635,6 +856,7 @@ class TMDBHelper:
                 "release_year": int(year) if year and year.isdigit() else None,
                 "overview": data.get("overview"),
                 "poster_path": data.get("poster_path"),
+                "backdrop_path": data.get("backdrop_path"),
                 "vote_average": str(data.get("vote_average") or ""),
                 "genres": genres,
             }
@@ -683,15 +905,30 @@ class TMDBHelper:
         data = self._api_get(f"/tv/{int(tv_tmdb_id)}/season/{int(season_number)}")
         if not isinstance(data, dict):
             return None
+        episode_names: dict[int, str] = {}
+        for ep in data.get("episodes") or []:
+            num = ep.get("episode_number")
+            name = (ep.get("name") or "").strip()
+            if num is not None and name:
+                episode_names[int(num)] = name
         out = {
             "name": data.get("name"),
             "overview": data.get("overview"),
             "poster_path": data.get("poster_path"),
             "episode_count": data.get("episode_count"),
             "season_number": season_number,
+            "episode_names": episode_names,
         }
         self._details_cache[cache_key] = out
         return out
+
+    def get_tv_episode_name(
+        self, tv_tmdb_id: int, season_number: int, episode_number: int
+    ) -> str | None:
+        season = self.fetch_tv_season_details(int(tv_tmdb_id), int(season_number))
+        if not season:
+            return None
+        return (season.get("episode_names") or {}).get(int(episode_number))
 
     def build_catalog_enrichment(
         self, *, tmdb_id: int, media_type: str, season_number: int | None = None
@@ -732,6 +969,7 @@ class TMDBHelper:
                 "release_year": int(year) if year and year.isdigit() else None,
                 "overview": data.get("overview"),
                 "poster_path": data.get("poster_path"),
+                "backdrop_path": data.get("backdrop_path"),
                 "vote_average": str(data.get("vote_average") or ""),
                 "genres": genres,
             }
@@ -762,11 +1000,13 @@ class TMDBHelper:
                 }
             )
         seasons.sort(key=lambda x: x["season_number"])
+        season_ep_total = sum(s["episode_count"] for s in seasons)
+        api_ep_total = int(data.get("number_of_episodes") or 0)
         out = {
             "tmdb_id": tid,
             "name": data.get("name"),
             "number_of_seasons": len(seasons),
-            "number_of_episodes": sum(s["episode_count"] for s in seasons),
+            "number_of_episodes": season_ep_total or api_ep_total,
             "seasons": seasons,
         }
         self._tv_tracking_cache[tid] = out

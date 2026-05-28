@@ -1,30 +1,60 @@
 # How to Run the Index Bot
 
+See also: [DEPLOYMENT.md](./DEPLOYMENT.md) (Termux + Mac split), [API_DOCS.md](./API_DOCS.md) (portal API).
+
 ## Quick Start
 
-### Option 1: Simple Run (Recommended for testing)
+### Option 1: Bot + portal together (recommended on server/Termux)
+```bash
+./run_all.sh
+```
+
+- Runs `ensure_env.sh` → installs missing deps from `requirements-all.txt`
+- Runs `check_readiness.py`
+- Starts **bot** and **portal** in background (`bot.log`, `portal.log`)
+
+Stop everything:
+```bash
+./stop_all.sh
+```
+
+### Option 2: Bot only (foreground, debugging)
 ```bash
 ./run_bot.sh
 ```
 
-This will:
-- Activate the virtual environment
-- Start the bot in the foreground (you'll see all output)
-- Press `Ctrl+C` to stop
+Press `Ctrl+C` to stop.
 
-### Option 2: Using Python directly
+### Option 3: Python directly
 ```bash
-source venv/bin/activate
+source venv/bin/activate   # or repo-root .venv
 python bot.py
 ```
 
-### Option 3: Background Run (for production)
+### Option 4: Portal only
 ```bash
-nohup python bot.py > bot.log 2>&1 &
+./run_portal.sh
 ```
 
-Then check logs with:
+Open `PORTAL_PUBLIC_URL` or use `/portal` in Telegram. API: [API_DOCS.md](./API_DOCS.md), live Swagger at `/docs`.
+
+### Option 5: Mac upload worker (pipeline only, no bot polling)
+
+Use when files live on a **Mac/PC** but the bot runs elsewhere (e.g. Termux). Requires the **same `DATABASE_URL`** on both machines.
+
 ```bash
+./run_upload_worker.sh
+```
+
+Create jobs in Telegram with Mac `local_path` values; the worker uploads when you tap **Start upload** (or when job is `planned`/`uploading` with ready paths).
+
+Env: `UPLOAD_WORKER_ENABLED`, `UPLOAD_WORKER_POLL_S`, `UPLOAD_WORKER_SEND_DELAY_S` — see `.env.example`.
+
+**Do not** run `bot.py` on Mac and Termux at the same time (409 conflict).
+
+### Option 6: Background bot only (manual)
+```bash
+nohup python bot.py > bot.log 2>&1 &
 tail -f bot.log
 ```
 
@@ -51,6 +81,9 @@ Then edit `.env`:
 | `DATABASE_URL` | — | Optional; **PostgreSQL** SQLAlchemy URL (if set, `DB_PATH` is ignored). Example: `postgresql+psycopg://user:pass@host:5432/dbname` |
 | `DB_PATH` | — | SQLite file when `DATABASE_URL` is unset; default `index_bot.db` |
 | `FORWARD_INGEST_SESSION` | — | Optional; Telethon session path |
+| `TELETHON_GATEWAY_ENABLED` | Bot Telethon | Default `true` — single queued client |
+| `TELETHON_PORTAL_SESSION` | Portal stream | Default `forward_ingest_portal.session` |
+| `UPLOAD_WORKER_*` | Mac worker | Poll interval, lock path — see `.env.example` |
 
 ### PostgreSQL on a server
 
@@ -63,7 +96,7 @@ Then edit `.env`:
 
 3. Install dependencies (`psycopg` is listed in `requirements/bot-index.txt`). Restart the bot; SQLAlchemy will **`create_all`** tables on first start (sufficient for Index_bot’s schema).
 
-4. **Migrating from SQLite:** export/import is not automated here — for a fresh server, start with Postgres empty; or use generic SQL tools to move data if you must keep old rows.
+4. **Migrating from SQLite:** on Termux, use `python scripts/migrate_sqlite_to_postgres.py` after `./scripts/setup_postgres_termux.sh` (see [TERMUX_SETUP.md §18](./TERMUX_SETUP.md)).
 
 SQLite remains the default when **`DATABASE_URL`** is empty.
 

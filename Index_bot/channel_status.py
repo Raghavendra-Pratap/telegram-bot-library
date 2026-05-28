@@ -20,11 +20,16 @@ def format_channel_status_icons(
     🤖 bot indexes new posts in this channel (live)
     📜 historical import via backfill (forwards into ingest)
     👤 historical only (backfill done, no live bot posts in source)
+    📡 Telethon member watch (new posts, bot not in channel)
     ⏳ registered but not historically ingested yet
     """
     if getattr(channel, "is_ingest_channel", False):
         return "📥"
     icons: list[str] = []
+    if getattr(channel, "telethon_watch_enabled", False) and not getattr(
+        channel, "bot_can_post", False
+    ):
+        icons.append("📡")
     if live_count > 0:
         icons.append("🤖")
     if backfill_count > 0:
@@ -59,6 +64,13 @@ def channel_status_lines(
         lines.append(
             f"🤖 <b>Bot monitoring</b> — <b>{live_count:,}</b> file(s) indexed from "
             "new posts in this channel."
+        )
+    elif getattr(channel, "telethon_watch_enabled", False) and not getattr(
+        channel, "bot_can_post", False
+    ):
+        lines.append(
+            "📡 <b>Member watch</b> — your Telethon account polls this channel for "
+            "<b>new</b> uploads (bot is not admin here)."
         )
     elif getattr(channel, "is_active", False):
         lines.append(
